@@ -1,2 +1,2 @@
-# AB5369_minimal
-Minimal startup for Bluetrum AB5369
+# AB5396_minimal
+Minimal startup for Bluetrum AB5396
