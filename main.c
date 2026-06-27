@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include "sfr.h"
 
 // ---------------------------------------------------------
 // The 8-byte Command Packet sent from Python (via pack_cmd)
@@ -74,6 +75,9 @@ typedef void (*rom_uart_send_packet_t)(uint32_t length);
 
 int entry(struct BootROM_Context *ctx) {
 	if (!ctx || !ctx->cmd) return 0;
+
+	// disable watchdog
+	WDTCON = 0xaa0;
 	
 	if (ctx->cmd->cmd_id == 0x00) { // INIT
 		
