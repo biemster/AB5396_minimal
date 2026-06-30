@@ -8,9 +8,7 @@ OBJDUMP = $(TOOLCHAIN)-objdump
 MINICHLINK = $(HOME)/temp/ch32fun/minichlink/minichlink
 
 ARCH_FLAGS = -march=rv32imc -mabi=ilp32
-
-CFLAGS = $(ARCH_FLAGS) -Wall
-
+CFLAGS = $(ARCH_FLAGS) -fPIC -Wall
 LDFLAGS = $(ARCH_FLAGS) -mno-relax -nostdlib -T ram.ld -Wl,-Map,$(TARGET).map
 
 SRCS  = $(TARGET).c

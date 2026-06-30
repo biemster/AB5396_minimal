@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <string.h>
 #include "sfr.h"
 
 // ---------------------------------------------------------
@@ -73,25 +74,16 @@ struct BootROM_Context {
 typedef void (*rom_uart_send_packet_t)(uint32_t length);
 #define ROM_UART_SEND_PACKET ((rom_uart_send_packet_t)0x000800a4)
 
+#define MSG "~ AB5396 ~"
 int entry(struct BootROM_Context *ctx) {
 	if (!ctx || !ctx->cmd) return 0;
 
 	// disable watchdog
 	WDTCON = 0xaa0;
-	
-	if (ctx->cmd->cmd_id == 0x00) { // INIT
-		
-		ctx->cmd_resp_buf[0] = 0x11223344; // Dummy Code key
-		ctx->cmd_resp_buf[1] = 0x00AABBCC; // Dummy Flash ID
-		
-		ctx->cmd_resp_buf[2] = 0x00112233;
-		ctx->cmd_resp_buf[3] = 0x44556677;
-		ctx->cmd_resp_buf[4] = 0x8899AABB;
-		ctx->cmd_resp_buf[5] = 0xCCDDEEFF;
 
-		// Tell the BootROM to frame and send 24 bytes out of cmd_resp_buf
-		ROM_UART_SEND_PACKET(24);
+	while(1) {
+		strcpy((char*)ctx->cmd_resp_buf, MSG);
+		ROM_UART_SEND_PACKET(strlen(MSG));
+		for(volatile int d = 0; d < 2000000; d++);
 	}
-
-	return 0;
 }

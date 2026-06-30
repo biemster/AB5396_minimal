@@ -127,7 +127,7 @@ def execcmd(cb, udl, send=None, recv=None, max_io=512, switch_baud=None):
         return data
 
 def do_the_stuff(execcmd, udl, fw_blob, blocksize, port):
-        # Query the information
+    # Query the information
     resp = execcmd(pack_cmd(BlCmd.GET_INFO, arg1=0x5259414E, arg3=0x67ca), udl, recv=24)
     chipid, loadaddr, commskey, _ = struct.unpack('>12sIII', resp)
     print(f' Chip ID:       {chipid}')
@@ -142,14 +142,16 @@ def do_the_stuff(execcmd, udl, fw_blob, blocksize, port):
     # Load blob
     if fw_blob:
         data = bytearray(fw_blob) + b'\x00' * align_by(len(fw_blob), blocksize)
-        execcmd(pack_cmd(BlCmd.MEM_WRITE, arg1=loadaddr, arg3=(len(data) // blocksize)), udl,send=data)
+        execcmd(pack_cmd(BlCmd.MEM_WRITE, arg1=loadaddr, arg3=(len(data) // blocksize)), udl, send=data)
         execcmd(pack_cmd(BlCmd.SET_CMD_HANDLER, arg1=loadaddr), udl)
 
         # start!
-        codekey, flashid, flashuid = struct.unpack('II16s', execcmd(pack_cmd(0x00), udl, recv=48))
-        print(f'- Code key: >>>> {codekey:08X} <<<<')
-        print(f'- Flash device ID: {flashid:06X}')
-        print(f'- Flash unique ID: {flashuid.hex()}')
+        udl.send_packet(pack_cmd(0x00))
+        while True:
+            try:
+                print(udl.recv_packet().decode())
+            except KeyboardInterrupt:
+                break
 
 if __name__ == '__main__':
     main()

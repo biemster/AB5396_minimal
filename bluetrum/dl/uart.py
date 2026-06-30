@@ -2,6 +2,7 @@ from bluetrum.crc import ab_crc16
 import time
 
 class UARTDownload:
+    DEBUG = False
     # special tokens
     SYNC_TOKEN  = b'\xA5\x96\x87\x5A'   # Sync token
     SYNC_RESP   = b'\x5A\x69\x78\xA5'   # Sync response
@@ -27,12 +28,14 @@ class UARTDownload:
         data = self.port.read(size)
         if len(data) < size:
             raise TimeoutError(f'Not enough data has been received from the port (had only {len(data)} bytes)')
+        if UARTDownload.DEBUG: print(f'< {data.hex()}')
         return data
 
     def port_write(self, data):
         self.port.write(data)
         # consume the echo back
         echo = self.port.read(len(data))
+        if UARTDownload.DEBUG: print(f'> {data.hex()}')
         #if len(echo) < len(data):
         #    raise TimeoutError('Did not receive the echo back')
         #if echo != data:
