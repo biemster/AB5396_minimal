@@ -84,6 +84,12 @@ int entry(struct BootROM_Context *ctx) {
 	while(1) {
 		strcpy((char*)ctx->cmd_resp_buf, MSG);
 		ROM_UART_SEND_PACKET(strlen(MSG));
+
+		ctx->cmd_resp_buf[0] = ctx->cmd->arg1;
+		ctx->cmd_resp_buf[1] = ctx->cmd->arg2;
+		ctx->cmd_resp_buf[2] = ctx->cmd->arg3;
+		ROM_UART_SEND_PACKET(3*4);
+
 		for(volatile int d = 0; d < 2000000; d++);
 	}
 }

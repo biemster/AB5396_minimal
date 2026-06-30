@@ -146,7 +146,7 @@ def do_the_stuff(execcmd, udl, fw_blob, blocksize, port):
         execcmd(pack_cmd(BlCmd.SET_CMD_HANDLER, arg1=loadaddr), udl)
 
         # start!
-        udl.send_packet(pack_cmd(0x00))
+        udl.send_packet(pack_cmd(0x00, arg1=int.from_bytes(b'arg1'), arg2=int.from_bytes(b'2'), arg3=int.from_bytes(b'a3')))
         while True:
             try:
                 print(udl.recv_packet().decode())
