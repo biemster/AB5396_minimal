@@ -146,12 +146,23 @@ def do_the_stuff(execcmd, udl, fw_blob, blocksize, port):
         execcmd(pack_cmd(BlCmd.SET_CMD_HANDLER, arg1=loadaddr), udl)
 
         # start!
-        udl.send_packet(pack_cmd(0x00, arg1=int.from_bytes(b'arg1'), arg2=int.from_bytes(b'2'), arg3=int.from_bytes(b'a3')))
-        while True:
-            try:
-                print(udl.recv_packet().decode())
-            except KeyboardInterrupt:
-                break
+        udl.send_packet(pack_cmd(0x00))
+        try:
+            print("\nListening for UART output... Press Ctrl+C to exit.")
+            while True:
+                if port.in_waiting > 0:
+                    received_bytes = port.read(port.in_waiting)
+                    output_str = ""
+                    for byte in received_bytes:
+                        if 32 <= byte <= 126 or byte in [10, 13]:
+                            output_str += chr(byte)
+                        else:
+                            output_str += f'\\x{byte:02x}'
+                    print(output_str, end='', flush=True)
+                time.sleep(0.01)
+        except KeyboardInterrupt:
+            print("\nStopping UART listener.")
+
 
 if __name__ == '__main__':
     main()
