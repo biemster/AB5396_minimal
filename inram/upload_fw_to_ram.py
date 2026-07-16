@@ -147,17 +147,24 @@ def do_the_stuff(execcmd, udl, fw_blob, blocksize, port):
 
         # start!
         udl.send_packet(pack_cmd(0x00))
+        print_hex = True
         try:
             print("\nListening for UART output... Press Ctrl+C to exit.")
+            nrx = 0
             while True:
                 if port.in_waiting > 0:
                     received_bytes = port.read(port.in_waiting)
                     output_str = ""
                     for byte in received_bytes:
-                        if 32 <= byte <= 126 or byte in [10, 13]:
-                            output_str += chr(byte)
+                        if print_hex:
+                            output_str += f'{byte:02x}'
+                            nrx += 1
+                            if nrx % 16 == 0: output_str += '\n'
                         else:
-                            output_str += f'\\x{byte:02x}'
+                            if 32 <= byte <= 126 or byte in [10, 13]:
+                               output_str += chr(byte)
+                            else:
+                               output_str += f'\\x{byte:02x}'
                     print(output_str, end='', flush=True)
                 time.sleep(0.01)
         except KeyboardInterrupt:
