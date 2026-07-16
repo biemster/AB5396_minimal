@@ -16,15 +16,16 @@ the sync byte, if you don't have a linkE programmer you can easily remove that a
 Additional info can be found in [^5] and [^6].
 
 ## compile and flash
+**WARNING: flashing a custom stage1 bootloader can brick the chip! If the stage1 loader code is not returned
+from the bootloader will not respond to `SYNC_TOKEN` anymore!**
+
 Current version moved the inram callback to `inram/`, and the code in `main.c` is run as the stage1 bootloader
 from `0x10800`. After compiling with `make` it should be packed in a header using `bluetrum-tools/mkheader.py`:
 ```bash
 python ../bluetrum-tools/mkheader.py -b --chipid 4c55434b01000000 my_boot.bin LUCK.bin
 ```
 The `--chipid` parameter is `b'LUCK'`. When the inram callback is run subsequently the bytes written to
-RAM address `0x14000` should be read back successfully.\
-** WARNING: flashing a custom stage1 bootloader can brick the chip! If the stage1 loader code is not returned
-from the bootloader will not respond to `SYNC_TOKEN`s anymore! **
+RAM address `0x14000` should be read back successfully.
 
 The stage1 loader header `LUCK.bin` can be written to flash with `bluetrum-tools/download.py`:
 ```bash
