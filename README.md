@@ -3,40 +3,49 @@ Minimal SDK for Bluetrum AB5396
 
 ## how
 This repo will be a minimal SDK for the Bluetrum BLE MCU AB5396 found in cheap USB BLE dongles[^1][^2].\
-First step is the appoach taken by atc1441[^3] to run code in the Boot ROM callback.
-When this works the firmware encryption needs to be figured out so code can be flashed to the chip, and
-a proper startup has to be developed too.
+There are currently two ways to run code on the chip, in the `inram/` folder the bootloader is sent
+a stub to be ran from `0x12000`, and for the second method the XIP cache is reverse engineered and
+described in [XIP.md](XIP.md). For this method `boot.c` implements the stage1 bootloader that is
+packed with `mkheader.py` from [^4] which sets up the XIP cache system and jumps to plain
+unobfuscated code in flash, which can be put there using the `download.py` script from that same project.
+Subsequently `main.c` contains the code that is run from XIP, at the address specified in `XIP_FLASH_OFFSET`.
 
 A programmer for these chips is simply an UART with RX and TX connected by a 200 - 470 Ohm resistor, and
-the RX side connected to the USB+ pin.
+the RX side connected to the USB+ pin (PB3).
 
-The Makefile uses `minichlink`[^4] to enter the bootloader by switching on 5v when the UART is waiting for
+The Makefile uses `minichlink`[^5] to enter the bootloader by switching on 5v when the UART is waiting for
 the sync byte, if you don't have a linkE programmer you can easily remove that and switch 5v to the chip manually.
 
-Additional info can be found in [^5] and [^6].
+Additional info can be found in [^6].
 
 ## compile and flash
 **WARNING: flashing a custom stage1 bootloader can brick the chip! If the stage1 loader code is not returned
 from the bootloader will not respond to `SYNC_TOKEN` anymore!**
 
-Current version moved the inram callback to `inram/`, and the code in `main.c` is run as the stage1 bootloader
-from `0x10800`. After compiling with `make` it should be packed in a header using `bluetrum-tools/mkheader.py`:
+Easy and safe quick tests can be done with the inram stub in `inram/main.c`, and can simply be done from
+that `inram/` folder:
 ```bash
-python ../bluetrum-tools/mkheader.py -b --chipid 4c55434b01000000 my_boot.bin LUCK.bin
+make clean all upload
 ```
-The `--chipid` parameter is `b'LUCK'`. When the inram callback is run subsequently the bytes written to
-RAM address `0x14000` should be read back successfully.
+Take into account this `Makefile` uses `minichlink` from [^5] and a WCH linkE programmer to toggle power.
 
-The stage1 loader header `LUCK.bin` can be written to flash with `bluetrum-tools/download.py`:
+To compile the custom stage1 bootloader and main program that will live in flash, just use `make` or `make clean all`
+in the root folder of the project The resulting stage1 loader header `LUCK.bin` can be written to flash
+with `bluetrum-tools/download.py`:
 ```bash
 python ../bluetrum-tools/download.py --port /dev/ttyACM0 --baud 115200 write 0x0 LUCK.bin
+```
+
+and the main firmware `main.bin` with the same tool should be flashed to the `XIP_FLASH_OFFSET` address (for example 0x1000):
+```bash
+python ../bluetrum-tools/download.py --port /dev/ttyACM0 --baud 115200 write 0x1000 main.bin
 ```
 
 ## progress
 - [x] Run from RAM using bootrom callback
 - [x] Reverse encryption scheme for firmware in flash
 - [x] Run from flash
-- [ ] Run from XIP flash
+- [x] Run from XIP flash
 - [ ] USB stack
 - [ ] RF stack
 
@@ -44,6 +53,6 @@ python ../bluetrum-tools/download.py --port /dev/ttyACM0 --baud 115200 write 0x0
 [^1]: https://www.aliexpress.com/item/1005009109220784.html
 [^2]: https://www.aliexpress.com/item/1005009109412274.html
 [^3]: https://github.com/atc1441/Bluetrum_AB5682_Hacking
-[^4]: https://github.com/cnlohr/ch32fun
-[^5]: https://github.com/kagaimiq/bluetrum-tools
+[^4]: https://github.com/kagaimiq/bluetrum-tools
+[^5]: https://github.com/cnlohr/ch32fun
 [^6]: https://github.com/ZhiqingLi/Sdk_Refresh
