@@ -72,6 +72,40 @@ static void print_newline(void)
 	ROM_UART0_PUTCHAR('\n');
 }
 
+static void print_string(const char *str) {
+	while (*str) {
+		ROM_UART0_PUTCHAR(*str++);
+	}
+}
+
+static void dump_system_state(const char *label) {
+	print_string("\r\n--- STATE: ");
+	print_string(label);
+	print_string(" ---\r\n");
+
+	/* Watchdog & Global Config */
+	print_string("WDTCON:  "); print_hex32(WDTCON); print_newline();
+	print_string("MEMCON:  "); print_hex32(MEMCON); print_newline();
+	print_string("NMICON:  "); print_hex32(NMICON); print_newline();
+
+	/* Proprietary Bluetrum Interrupt Controller (PIC) */
+	print_string("PICCON:  "); print_hex32(PICCON); print_newline();
+	print_string("PICEN:   "); print_hex32(PICEN); print_newline();
+	print_string("PICPR:   "); print_hex32(PICPR); print_newline();
+	print_string("PICADR:  "); print_hex32(PICADR); print_newline();
+	print_string("PICPND:  "); print_hex32(PICPND); print_newline();
+
+	/* Cache & Exceptions */
+	print_string("CACHCON0:"); print_hex32(CACHCON0); print_newline();
+	print_string("CACHCON1:"); print_hex32(CACHCON1); print_newline();
+	print_string("EPICCON: "); print_hex32(EPICCON); print_newline();
+
+	/* Misc */
+	print_string("EFCON0:  "); print_hex32(EFCON0); print_newline();
+	print_string("ISR7_CB: "); print_hex32(REG32(0x00010044)); print_newline();
+	print_string("----------------------\r\n\r\n");
+}
+
 /*
  * --------------------------------------------------------------------------
  * CUSTOM CACHE FILLER
@@ -146,14 +180,10 @@ int entry(void *ctx)
 	 */
 #if XIP_JUMP
 	print_newline();
-	print_hex32(0x10000000);
-	ROM_UART0_PUTCHAR(':');
-	ROM_UART0_PUTCHAR(' ');
-	ROM_UART0_PUTCHAR('J');
-	ROM_UART0_PUTCHAR('U');
-	ROM_UART0_PUTCHAR('M');
-	ROM_UART0_PUTCHAR('P');
-	print_newline();
+	print_string("10000000: JUMP\r\n");
+
+	/* DUMP STATE BEFORE JUMP */
+	dump_system_state("IN-RAM STUB");
 
 	/* 
 	 * Cast the base of the XIP window to a function pointer 
