@@ -147,7 +147,7 @@ def do_the_stuff(execcmd, udl, fw_blob, blocksize, port):
 
         # start!
         udl.send_packet(pack_cmd(0x00))
-        print_hex = True
+        print_hex = False
         try:
             print("\nListening for UART output... Press Ctrl+C to exit.")
             nrx = 0

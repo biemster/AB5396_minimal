@@ -1,6 +1,28 @@
 #include <stdint.h>
 #include "sfr.h"
 
+/*
+ * ============================================================================
+ * AB5396B - CUSTOM OPEN-SOURCE XIP STAGE-1 DRIVER
+ * ============================================================================
+ */
+
+/* 
+ * The physical SPI flash offset that CPU address 0x10000000 maps to.
+ * 0x2000 skips the boot headers
+ */
+#define XIP_FLASH_OFFSET 0x1000
+#ifndef XIP_JUMP
+#define XIP_JUMP 0
+#endif
+
+#define ISR7_CALLBACK   (*(volatile uint32_t *)(uintptr_t)0x00010044)
+
+/*
+ * --------------------------------------------------------------------------
+ * ROM Functions
+ * --------------------------------------------------------------------------
+ */
 typedef void (*rom_uart0_init)(void);
 #define ROM_UART0_INIT ((rom_uart0_init)0x0008173e)
 
@@ -10,59 +32,186 @@ typedef void (*rom_uart0_putchar)(char c);
 typedef void (*rom_delay)(uint32_t cycles);
 #define ROM_DELAY ((rom_delay)0x00080284)
 
-typedef void (*rom_goto_12010)(void);
-#define ROM_GOTO_12010 ((rom_goto_12010)0x000813f2)
+typedef void (*rom_system_init)(void);
+#define ROM_SYSTEM_INIT ((rom_system_init)0x00084000)
 
-typedef void (*rom_USB_eventloop)(void);
-#define ROM_USB_EVENTLOOP ((rom_USB_eventloop)0x00080c44)
+/* We call the vendor's low-level DMA primitive directly */
+typedef uint32_t (*rom_dma_t)(
+	uintptr_t dest_ram, uintptr_t flash_offset, uint32_t size, 
+	uint32_t lfsr_cfg, uint32_t lfsr_en
+);
+#define VENDOR_DMA ((rom_dma_t)0x0008964c)
 
-typedef void (*rom_goto_stage1)(void);
-#define ROM_GOTO_STAGE1 ((rom_goto_stage1)0x00010800)
+/*
+ * --------------------------------------------------------------------------
+ * Format Helpers
+ * --------------------------------------------------------------------------
+ */
+#ifndef REG32
+#define REG32(addr)  (*(volatile uint32_t *)(uintptr_t)(addr))
+#endif
 
-uint8_t *bootrom_checkpoint = (uint8_t*)0x0001204b;
+static void print_hex8(uint8_t v)
+{
+	static const char hex[] = "0123456789abcdef";
+	ROM_UART0_PUTCHAR(hex[v >> 4]);
+	ROM_UART0_PUTCHAR(hex[v & 0xf]);
+}
 
-int entry(void *ctx) {
+static void print_hex32(uint32_t v)
+{
+	print_hex8(v >> 24);
+	print_hex8(v >> 16);
+	print_hex8(v >> 8);
+	print_hex8(v & 0xff);
+}
 
-	// give the bootrom some time to ack entering this
+static void print_newline(void)
+{
+	ROM_UART0_PUTCHAR('\r');
+	ROM_UART0_PUTCHAR('\n');
+}
+
+/*
+ * --------------------------------------------------------------------------
+ * CUSTOM CACHE FILLER
+ * --------------------------------------------------------------------------
+ */
+__attribute__((noinline))
+static uint32_t xip_callback(void)
+{
+	uint32_t fault_addr = ICADRMS;
+	
+	/* Shift CPU address to bypass headers and land on logical partition */
+	uint32_t flash_offset = (fault_addr & 0x00ffffff) + XIP_FLASH_OFFSET;
+	
+	/* Calculate cache geometry */
+	uint32_t page_num = fault_addr >> 9;
+	uint32_t index    = page_num & 0x3f;
+	uint32_t dest_ram = 0x00060000 + (index * 0x200);
+
+	/* Unlock SRAM */
+	ICINDEX = index;
+	CACHCON1 = 0x10;
+	ICTAG = 0;
+	CACHCON1 = 0x04;
+
+	/* Raw DMA Read (Unscrambled) */
+	VENDOR_DMA((uintptr_t)dest_ram, (uintptr_t)flash_offset, 0x200, 0, 0);
+
+	/* Lock SRAM & Set Valid Bit */
+	ICTAG = page_num | 0x10000;
+	CACHCON1 = 0x24;
+
+	return 0;
+}
+
+/*
+ * --------------------------------------------------------------------------
+ * ENTRY
+ * --------------------------------------------------------------------------
+ */
+int entry(void *ctx)
+{
+	(void)ctx;
+
 	ROM_DELAY(100000);
-
-	// disable watchdog
-//	WDTCON = 0xaa0;
-
-//	uint8_t bcp1 = *bootrom_checkpoint;
-//	// ROM_GOTO_12010();
-//	uint8_t bcp2 = *bootrom_checkpoint;
-
+	ROM_SYSTEM_INIT();
 	ROM_UART0_INIT();
-//	ROM_UART0_PUTCHAR('>');
-//	ROM_UART0_PUTCHAR(' ');
 
-//	ROM_UART0_PUTCHAR('0' + bcp1);
-//	ROM_UART0_PUTCHAR(',');
-//	ROM_UART0_PUTCHAR('0' + bcp2);
-//	ROM_UART0_PUTCHAR(',');
+	ISR7_CALLBACK = (uint32_t)(uintptr_t)&xip_callback;
 
-	uint8_t *addr = (uint8_t*)0x10800;
-	while(addr < 0x10810) {
-		ROM_UART0_PUTCHAR(*addr++);
+	/* Configure XIP Window & Reset Cache State */
+	XIP_CMD   = 0x00000342;
+	XIP_CTRL  = 1;
+	XIP_BASE  = 0;
+	XIP_LIMIT = 0;
+
+	CACHCON0 = 0x00010001;
+	CACHCON1 = 0;
+	ICTAG    = 0;
+	ICINDEX  = 0;
+	ICADRMS  = 0;
+	ICLOCK   = 0;
+
+	/* Enable Interrupt Routing and Mapping */
+	NMICON = 1;
+	PICPR |= 1;
+	MEMCON |= 0x00010000;
+
+	/*
+	 * ----------------------------------------------------------------------
+	 * VERIFICATION: Read 1KB (1024 bytes) via XIP, or jump to it!
+	 * ----------------------------------------------------------------------
+	 */
+#if XIP_JUMP
+	print_newline();
+	print_hex32(0x10000000);
+	ROM_UART0_PUTCHAR(':');
+	ROM_UART0_PUTCHAR(' ');
+	ROM_UART0_PUTCHAR('J');
+	ROM_UART0_PUTCHAR('U');
+	ROM_UART0_PUTCHAR('M');
+	ROM_UART0_PUTCHAR('P');
+	print_newline();
+
+	/* 
+	 * Cast the base of the XIP window to a function pointer 
+	 * and execute it. 
+	 */
+	typedef void (*main_entry_t)(void);
+	main_entry_t main_app = (main_entry_t)0x10000000;
+	
+	main_app();
+
+	/* We should never reach this if main.bin loops forever */
+	for (;;)
+		;
+#else
+	volatile uint8_t *xip_ptr = (volatile uint8_t *)0x10000000;
+	
+	print_newline();
+	ROM_UART0_PUTCHAR('>'); print_hex32(REG32(0x00011000));
+	print_newline();
+	ROM_UART0_PUTCHAR('>'); print_hex32(REG32(0x00011004));
+	print_newline();
+	
+	for (int i = 0; i < 1024; i += 16) {
+		
+		/* 1. Print Address (e.g. 10000000: ) */
+		print_hex32(0x10000000 + i);
+		ROM_UART0_PUTCHAR(':');
+		ROM_UART0_PUTCHAR(' ');
+
+		/* 2. Print Hex Bytes (This triggers the XIP hardware faults!) */
+		for (int j = 0; j < 16; j++) {
+			print_hex8(xip_ptr[i + j]);
+			if ((j % 2) == 1) ROM_UART0_PUTCHAR(' ');
+		}
+
+		ROM_UART0_PUTCHAR(' ');
+		ROM_UART0_PUTCHAR('|');
+
+		/* 3. Print ASCII Representation */
+		for (int j = 0; j < 16; j++) {
+			uint8_t c = xip_ptr[i + j];
+			if (c >= 32 && c <= 126) {
+				ROM_UART0_PUTCHAR(c);
+			} else {
+				ROM_UART0_PUTCHAR('.');
+			}
+		}
+		
+		ROM_UART0_PUTCHAR('|');
+		print_newline();
 	}
 
-//	addr = (uint8_t*)0x12000;
-//	while(addr < 0x12020) {
-//		ROM_UART0_PUTCHAR(*addr++);
-//	}
+	print_newline();
+#endif
 
-//	PICADR = 0x80000;
-//	ROM_GOTO_STAGE1();
-
-	addr = (uint8_t*)0x14000;
-	while(addr < 0x14004) {
-		ROM_UART0_PUTCHAR(*addr++);
-	}
-
-	while(1) {
-		ROM_UART0_PUTCHAR('x');
-		ROM_DELAY(100000);
-		WDTCON = 10; // feed
-	}
+	/* Halt safely */
+	for (;;)
+		;
+		
+	return 0;
 }

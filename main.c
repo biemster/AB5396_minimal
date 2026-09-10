@@ -13,26 +13,19 @@ typedef void (*rom_uart0_init)(void);
 typedef void (*rom_uart0_putchar)(char c);
 #define ROM_UART0_PUTCHAR ((rom_uart0_putchar)0x0008172e)
 
+typedef char (*rom_uart0_getchar)(void);
+#define ROM_UART0_GETCHAR ((rom_uart0_putchar)0x00081712)
+
 typedef void (*rom_delay)(uint32_t cycles);
 #define ROM_DELAY ((rom_delay)0x00080284)
 
 int main(void) {
-	// disable watchdog
-//	WDTCON = 0xaa0; // !!! WILL BRICK THE CHIP !!!
-//
-//	ROM_RESET_PIC(); // !!! OR IS IT THIS? !!!
-//	ROM_SYSTEM_INIT(); // !!! OR THIS? !!!
-//	ROM_UART0_INIT(); // !!! OR THIS? !!!
+	ROM_UART0_INIT();
 
-//	 while(1) { // !!! OR THIS? !!!
-//		ROM_UART0_PUTCHAR('b');
-//		ROM_DELAY(100000);
-//	}
+	while(1) {
+		ROM_UART0_PUTCHAR('b');
+		ROM_DELAY(100000);
+	}
 
-	uint8_t *addr = (uint8_t*)0x14000;
-	*addr++ = 0x1a;
-	*addr++ = 0x2b;
-	*addr++ = 0x3c;
-	*addr++ = 0x4e;
 	return 0;
 }

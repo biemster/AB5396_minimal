@@ -1,4 +1,5 @@
 TARGET = main
+XIP_JUMP ?= 0
 
 TOOLCHAIN = riscv64-elf
 CC = $(TOOLCHAIN)-gcc
@@ -7,7 +8,7 @@ OBJDUMP = $(TOOLCHAIN)-objdump
 
 MINICHLINK = $(HOME)/temp/ch32fun/minichlink/minichlink
 
-ARCH_FLAGS = -march=rv32imc -mabi=ilp32
+ARCH_FLAGS = -march=rv32imc_zicsr -mabi=ilp32
 CFLAGS = $(ARCH_FLAGS) -fPIC -Wall
 LDFLAGS = $(ARCH_FLAGS) -mno-relax -nostdlib -T ram.ld -Wl,-Map,$(TARGET).map
 
@@ -38,7 +39,7 @@ $(TARGET).lst: $(TARGET).elf
 		--wide "$<" > "$@"
 
 %.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -DXIP_JUMP=$(XIP_JUMP) -c $< -o $@
 
 %.o: %.s
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -49,4 +50,5 @@ clean:
 upload:
 	$(MINICHLINK) -f
 	(sleep 1 && $(MINICHLINK) -k5 > /dev/null 2>&1) &
-	python upload_fw_to_ram.py --firmware $(TARGET).bin
+	#($(MINICHLINK) -f && sleep 3 && $(MINICHLINK) -k5 > /dev/null 2>&1) # for stage1 built with TEST_MODE 1
+	python upload_fw_to_ram.py --port /dev/ttyACM0 --firmware $(TARGET).bin
