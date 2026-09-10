@@ -20,6 +20,7 @@ typedef void (*rom_delay)(uint32_t cycles);
 #define ROM_DELAY ((rom_delay)0x00080284)
 
 int main(void) {
+	ROM_SYSTEM_INIT();
 	ROM_UART0_INIT();
 
 	while(1) {
