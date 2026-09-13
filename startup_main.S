@@ -1,10 +1,16 @@
 .section .init, "ax"
 .global _start
 _start:
-	/* Initialize the stack pointer */
+	/* 1. Initialize the stack pointer */
 	la sp, _estack
 
-	/* Copy .data from XIP flash to RAM */
+	/* 2. Initialize the Global Pointer (CRITICAL for static vars and libc!) */
+.option push
+.option norelax
+	la gp, __global_pointer$
+.option pop
+
+	/* 3. Copy .data from XIP flash to RAM */
 	la a0, _sidata
 	la a1, _sdata
 	la a2, _edata
@@ -16,7 +22,7 @@ _start:
 	addi a1, a1, 4
 	blt a1, a2, 1b
 2:
-	/* Zero out .bss */
+	/* 4. Zero out .bss */
 	la a0, _sbss
 	la a1, _ebss
 	bge a0, a1, 4f
@@ -25,4 +31,13 @@ _start:
 	addi a0, a0, 4
 	blt a0, a1, 3b
 4:
+	/* 5. Call libc initialization (sets up memory, statics, etc.) */
+	la a0, __libc_init_array
+	beqz a0, 5f
+	jalr a0
+5:
+	/* 6. Enter Main */
 	call main
+
+	/* Catch unexpected exit from main */
+6:  j 6b

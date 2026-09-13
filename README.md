@@ -30,13 +30,19 @@ make clean all upload
 Take into account this `Makefile` uses `minichlink` from [^5] and a WCH linkE programmer to toggle power.
 
 To compile the custom stage1 bootloader and main program that will live in flash, just use `make` or `make clean all`
-in the root folder of the project The resulting stage1 loader header `LUCK.bin` can be written to flash
-with `bluetrum-tools/download.py`:
+in the root folder of the project. Currently the firmware uses microshell [^7], so clone that repo too and point
+the variable in the `Makefile` to this. Also if you keep using the single wire UART to interact with `microshell`,
+you can turn off the terminal echo like this:
+```bash
+sed -i "s/echo != false/echo != false \&\& ch < ' '/" ../microshell/src/src/ush_read_char.c
+```
+
+After running `make` the resulting stage1 loader header `LUCK.bin` can be written to flash with `bluetrum-tools/download.py`:
 ```bash
 python ../bluetrum-tools/download.py --port /dev/ttyACM0 --baud 115200 write 0x0 LUCK.bin
 ```
 
-and the main firmware `main.bin` with the same tool should be flashed to the `XIP_FLASH_OFFSET` address (for example 0x1000):
+and the main firmware `main.bin` with the same tool should be flashed to the `MAIN_FLASH_OFFSET` address (for example 0x1000):
 ```bash
 python ../bluetrum-tools/download.py --port /dev/ttyACM0 --baud 115200 write 0x1000 main.bin
 ```
@@ -46,6 +52,7 @@ python ../bluetrum-tools/download.py --port /dev/ttyACM0 --baud 115200 write 0x1
 - [x] Reverse encryption scheme for firmware in flash
 - [x] Run from flash
 - [x] Run from XIP flash
+- [x] microshell
 - [ ] USB stack
 - [ ] RF stack
 
@@ -56,3 +63,4 @@ python ../bluetrum-tools/download.py --port /dev/ttyACM0 --baud 115200 write 0x1
 [^4]: https://github.com/kagaimiq/bluetrum-tools
 [^5]: https://github.com/cnlohr/ch32fun
 [^6]: https://github.com/ZhiqingLi/Sdk_Refresh
+[^7]: https://github.com/marcinbor85/microshell
