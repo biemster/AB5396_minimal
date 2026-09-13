@@ -1,5 +1,6 @@
 TARGET = main
 XIP_JUMP ?= 0
+XIP_PAGING_TEST ?= 0
 
 TOOLCHAIN = riscv64-elf
 CC = $(TOOLCHAIN)-gcc
@@ -39,7 +40,7 @@ $(TARGET).lst: $(TARGET).elf
 		--wide "$<" > "$@"
 
 %.o: %.c
-	$(CC) $(CFLAGS) -DXIP_JUMP=$(XIP_JUMP) -c $< -o $@
+	$(CC) $(CFLAGS) -DXIP_JUMP=$(XIP_JUMP) -DXIP_PAGING_TEST=$(XIP_PAGING_TEST) -c $< -o $@
 
 %.o: %.s
 	$(CC) $(CFLAGS) -c $< -o $@

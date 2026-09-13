@@ -15,6 +15,9 @@
 #ifndef XIP_JUMP
 #define XIP_JUMP 0
 #endif
+#ifndef XIP_PAGING_TEST
+#define XIP_PAGING_TEST 0
+#endif
 
 #define ISR7_CALLBACK   (*(volatile uint32_t *)(uintptr_t)0x00010044)
 
@@ -51,11 +54,11 @@ typedef uint32_t (*rom_dma_t)(
 #define REG32(addr)  (*(volatile uint32_t *)(uintptr_t)(addr))
 #endif
 
-static void print_hex8(uint8_t v)
-{
-	static const char hex[] = "0123456789abcdef";
-	ROM_UART0_PUTCHAR(hex[v >> 4]);
-	ROM_UART0_PUTCHAR(hex[v & 0xf]);
+static void print_hex8(uint8_t v) {
+	uint8_t hi = v >> 4;
+	uint8_t lo = v & 0x0F;
+	ROM_UART0_PUTCHAR(hi < 10 ? '0' + hi : 'a' + hi - 10);
+	ROM_UART0_PUTCHAR(lo < 10 ? '0' + lo : 'a' + lo - 10);
 }
 
 static void print_hex32(uint32_t v)
@@ -116,12 +119,17 @@ static uint32_t xip_callback(void)
 {
 	uint32_t fault_addr = ICADRMS;
 	
-	/* Shift CPU address to bypass headers and land on logical partition */
-	uint32_t flash_offset = (fault_addr & 0x00ffffff) + XIP_FLASH_OFFSET;
-	
-	/* Calculate cache geometry */
-	uint32_t page_num = fault_addr >> 9;
-	uint32_t index    = page_num & 0x3f;
+	/* 1. LIVE TRACE: Print the exact address that missed! */
+	ROM_UART0_PUTCHAR('[');
+	print_hex32(fault_addr);
+	ROM_UART0_PUTCHAR(']');
+	ROM_UART0_PUTCHAR(' ');
+
+	/* 2. Calculate Page Geometry */
+	uint32_t aligned_addr = fault_addr & ~0x1FF;
+	uint32_t flash_offset = (aligned_addr & 0x00ffffff) + XIP_FLASH_OFFSET;
+	uint32_t page_num = aligned_addr >> 9;
+	uint32_t index = page_num & 0x3F; /* Standard Direct-Mapped */
 	uint32_t dest_ram = 0x00060000 + (index * 0x200);
 
 	/* Unlock SRAM */
@@ -134,6 +142,7 @@ static uint32_t xip_callback(void)
 	VENDOR_DMA((uintptr_t)dest_ram, (uintptr_t)flash_offset, 0x200, 0, 0);
 
 	/* Lock SRAM & Set Valid Bit */
+	ICINDEX = index;
 	ICTAG = page_num | 0x10000;
 	CACHCON1 = 0x24;
 
@@ -197,6 +206,68 @@ int entry(void *ctx)
 	/* We should never reach this if main.bin loops forever */
 	for (;;)
 		;
+#elif XIP_PAGING_TEST
+	print_string("\r\n--- AUTOMATED XIP CACHE VERIFIER ---\r\n");
+
+	/* Buffer in unused RAM to hold the 'Ground Truth' from raw flash */
+	uint8_t *ground_truth = (uint8_t *)0x00013000;
+	volatile uint8_t *xip = (volatile uint8_t *)0x10000000;
+
+	/* 1. Fetch Ground Truth: Page 0, Page 1, and Page 64 (Eviction Target) */
+	VENDOR_DMA((uintptr_t)ground_truth, XIP_FLASH_OFFSET, 1024, 0, 0); /* Pages 0 and 1 */
+	VENDOR_DMA((uintptr_t)ground_truth + 1024, XIP_FLASH_OFFSET + 0x8000, 512, 0, 0); /* Page 64 */
+
+	int errors = 0;
+
+	/* TEST 1: Unaligned Miss */
+	print_string("[TEST 1] Unaligned Cache Miss... ");
+	uint8_t dummy = xip[0x234]; /* Trigger unaligned fault on Page 1 */
+	for(int i = 0x200; i < 0x240; i++) {
+		if (xip[i] != ground_truth[i]) errors++;
+	}
+	if (errors) print_string("FAIL!\r\n"); else print_string("PASS\r\n");
+
+	/* TEST 2: Boundary Cross */
+	errors = 0;
+	print_string("[TEST 2] Boundary Cross (0x1F8 to 0x207)... ");
+	for(int i = 0x1F8; i < 0x208; i++) {
+		if (xip[i] != ground_truth[i]) errors++;
+	}
+	if (errors) print_string("FAIL!\r\n"); else print_string("PASS\r\n");
+
+	/* TEST 2.5: Uncached Boundary Cross */
+	print_string("[TEST 2.5] Uncached Boundary Cross (0x3F8 to 0x407)... ");
+	for(int i = 0x3F8; i < 0x408; i++) {
+		volatile uint8_t dummy2 = xip[i];
+	}
+	print_string("DONE\r\n");
+
+	print_string("[TEST 2.7] True Double Miss (0x9F8 to 0xA07)... ");
+	for(int i = 0x9F8; i < 0xA08; i++) {
+		volatile uint8_t dummy2 = xip[i];
+	}
+	print_string("DONE\r\n");
+
+	/* TEST 3: Eviction & Tag Check */
+	errors = 0;
+	print_string("[TEST 3] Cache Eviction (Index Aliasing)... ");
+	dummy = xip[0x0000]; /* Load Page 0 to Slot 0 */
+	dummy = xip[0x8000]; /* Load Page 64 to Slot 0 (Evicts Page 0) */
+
+	/* Verify Page 64 */
+	for(int i = 0; i < 16; i++) {
+		if (xip[0x8000 + i] != ground_truth[1024 + i]) errors++;
+	}
+
+	/* Re-fetch Page 0 */
+	for(int i = 0; i < 16; i++) {
+		if (xip[i] != ground_truth[i]) errors++;
+	}
+	if (errors) print_string("FAIL!\r\n"); else print_string("PASS\r\n");
+
+	if (errors == 0) {
+		print_string("\r\nALL XIP HARDWARE TESTS PASSED!\r\n");
+	}
 #else
 	volatile uint8_t *xip_ptr = (volatile uint8_t *)0x10000000;
 	

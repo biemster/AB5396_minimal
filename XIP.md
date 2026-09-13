@@ -154,6 +154,7 @@ static uint32_t xip_callback(void) {
     /* 6. Lock SRAM & Mark Line Valid.
      * Bit 16 (0x10000) acts as the "Valid" flag. 
      * CACHCON1 = 0x24 locks the SRAM and commits it back to the CPU. */
+    REG32(0x00000460) = index;              /* ICINDEX (need to be set again, got clobbered) */
     REG32(0x0000045C) = page_num | 0x10000; /* ICTAG */
     REG32(0x00000458) = 0x24;               /* CACHCON1 */
 

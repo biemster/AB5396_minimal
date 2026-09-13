@@ -62,13 +62,10 @@ static int uart0_poll(void) {
 __attribute__((noinline))
 static uint32_t xip_callback(void) {
 	uint32_t fault_addr = ICADRMS;
-	
-	/* Map CPU address to physical Flash */
-	uint32_t flash_offset = (fault_addr & 0x00ffffff) + MAIN_FLASH_OFFSET;
-	
-	/* Cache Geometry */
-	uint32_t page_num = fault_addr >> 9;
-	uint32_t index    = page_num & 0x3f;
+	uint32_t aligned_addr = fault_addr & ~0x1FF;
+	uint32_t flash_offset = (aligned_addr & 0x00ffffff) + MAIN_FLASH_OFFSET;
+	uint32_t page_num = aligned_addr >> 9;	
+	uint32_t index = page_num & 0x3F; /* Standard Direct-Mapped */
 	uint32_t dest_ram = 0x00060000 + (index * 0x200);
 
 	/* Unlock SRAM */
@@ -80,7 +77,7 @@ static uint32_t xip_callback(void) {
 	/* Raw DMA Read (Unscrambled) */
 	VENDOR_DMA((uintptr_t)dest_ram, (uintptr_t)flash_offset, 0x200, 0, 0);
 
-	/* Lock SRAM & Set Valid Bit */
+	ICINDEX = index;
 	ICTAG = page_num | 0x10000;
 	CACHCON1 = 0x24;
 
