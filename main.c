@@ -2,6 +2,7 @@
 #include <string.h>
 #include "sfr.h"
 #include "inc/ush.h"
+#include "bluetrum_usb.h"
 
 /* ROM prototypes */
 typedef void (*rom_clock_init)(void);
@@ -47,6 +48,45 @@ static void print_string(const char *str) {
 	}
 }
 
+/* 
+ * The "interrupt" attribute is critical for RISC-V so the compiler 
+ * generates an `mret` and saves all registers
+ */
+__attribute__((section(".isr")))
+__attribute__((interrupt))
+void default_isr(void) {
+	while (1) {
+		// Trap unhandled interrupts here
+	}
+}
+
+__attribute__((section(".isr")))
+__attribute__((interrupt))
+void usb_isr_wrapper(void) {
+	bt_usb_isr(); // Call our stack's handler
+}
+
+/* No section attribute required, GCC naturally puts this in RAM (.data) */
+__attribute__((aligned(256)))
+void *isr_vector_table[16] = {
+	(void*)0x00000000, /* 0x00: Ignored by PIC during IRQs */
+	(void*)0x00080E84, /* 0x04: ISR0 */
+	(void*)0x00080E8C, /* 0x08: ISR1 */
+	(void*)0x00080E9A, /* 0x0C: ISR2 */
+	(void*)0x00000000, /* 0x10: ISR3 */
+	(void*)0x00000000, /* 0x14: ISR4 */
+	(void*)0x00000000, /* 0x18: ISR5 */
+	(void*)0x00000000, /* 0x1C: ISR6 */
+	(void*)0x00084020, /* 0x20: ISR7 XIP Cache NMI handler */
+	(void*)0x00000000, /* 0x24: ISR8 */
+	(void*)0x00000000, /* 0x28: ISR9 */
+	(void*)0x00080EA2, /* 0x2C: ISR10 */
+	(void*)0x00000000, /* 0x30: ISR11 */
+	(void*)0x00000000, /* 0x34: ISR12 */
+	(void*)0x00000000, /* 0x38: ISR13 */
+	(void*)0x00000000  /* 0x3C: ISR14 USB */
+};
+
 /* called from USH_ASSERT on failure */
 void ush_assert_failed(const char *file, int line) {
 	/* simple visible marker */
@@ -82,6 +122,7 @@ static int ush_read_cb(struct ush_object *self, char *ch)
 {
 	(void)self;
 	int v = uart0_poll();   /* returns -1 if nothing */
+//	int v = bt_cdc_read_char(); /* Non-blocking, returns -1 if empty */
 	if (v < 0) return 0;    /* no data */
 	*ch = (char)(v & 0xff);
 	return 1;               /* a char was read */
@@ -91,6 +132,7 @@ static int ush_write_cb(struct ush_object *self, char c)
 {
 	(void)self;
 	ROM_UART0_PUTCHAR(c);
+//	bt_cdc_write_char(c); /* Blocking with safety timeout */
 	return 1;
 }
 
@@ -126,7 +168,16 @@ int main(void) {
 	ROM_CLOCK_INIT();
 	ROM_UART0_INIT();
 
-	/* hostname debug */
+	isr_vector_table[15] = (void *)usb_isr_wrapper;
+	PICADR = (uint32_t)isr_vector_table;
+
+	/* Init USB CDC ACM */
+	bt_usb_init();
+	PICPR |= 0x80; // Set interrupt priority/routing for USB
+	PICEN |= 0x80; // Enable the USB interrupt line in the PIC
+	PICCON |= 0x10007;
+
+	/* microshell hostname */
 	strcpy(g_hostname, "AB5396");
 
 	/* initialize shell object and descriptor */
@@ -135,15 +186,14 @@ int main(void) {
 
 	/* mount root node (empty root for now) */
 	ush_node_mount(&g_ush, "/", &g_root, NULL, 0);
-
 	ush_printf(&g_ush, "~ %s ~\r\n", g_hostname);
 
 	/* main loop: non-blocking service */
 	while (1) {
 		ush_service(&g_ush);
-		
+		bt_usb_tick();
+
 		/* other periodic tasks can run here */
-		ROM_DELAY(1000);
 		WDTCON = 10; // feed doggy
 	}
 

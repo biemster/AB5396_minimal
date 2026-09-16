@@ -34,6 +34,8 @@ SECTIONS {
 		PROVIDE( __global_pointer$ = . + 0x800 );
 		
 		*(.data .data.*)
+		*(.isr)
+		*(.usb)
 		*(.sdata .sdata.*)
 		. = ALIGN(4);
 		_edata = .;

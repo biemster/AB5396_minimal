@@ -36,6 +36,7 @@ you can turn off the terminal echo like this:
 ```bash
 sed -i "s/echo != false/echo != false \&\& ch < ' '/" ../microshell/src/src/ush_read_char.c
 ```
+This is not necessary if you interact with `microshell` over the USB ACM interface.
 
 After running `make` the resulting stage1 loader header `LUCK.bin` can be written to flash with `bluetrum-tools/download.py`:
 ```bash
