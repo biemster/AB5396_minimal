@@ -237,7 +237,6 @@ typedef enum {
 } ep0_stage_t;
 
 static volatile ep0_stage_t g_ep0_stage       = EP0_STAGE_SETUP;
-static volatile bool        g_ep0_setup_ready = false;
 static volatile bool        g_usb_configured  = false;
 
 static bt_usb_setup_packet_t g_setup_pkt;
@@ -254,19 +253,19 @@ static usb_cdc_line_coding_t g_line_coding = {
  * CORE FUNCTIONS (EXECUTED IN RAM)
  * ============================================================================== */
 
-USB_FUNC
+ISR_FUNC
 static void bt_usb_ep0_tx(const void* data, uint16_t len) {
 	if (len > 64) len = 64; 
 	if (len > 0 && data) {
-		/* Cast away volatile for the memcpy to work properly */
 		memcpy((void*)ep0_buf, data, len);
 		USBCON2 = len | 0x10000; /* Trigger EP0 DMA */
+		while (USBCON2 & 0x10000); /* Wait for DMA to fill the hardware FIFO */
 	}
 	UINDEX = 0;
 	UCSR0 = 0x0A; /* TxPktRdy (0x02) | DataEnd (0x08) */
 }
 
-USB_FUNC
+ISR_FUNC
 static void bt_usb_ep0_stall(void) { 
 	UINDEX = 0;
 	UCSR0 = 0x20; /* SendStall (Bit 5 in CSR0) */
@@ -429,8 +428,53 @@ void bt_usb_isr(void) {
 						UCSR0 = 0x48;
 					}
 					else {
-						/* Defer IN-data transfers (GET_DESC, GET_STATUS) to the tick function for now */
-						g_ep0_setup_ready = true;
+						/* ---- Handle IN-Data Transfers immediately ---- */
+						if ((req_type & 0x60) == 0x00) { /* Standard Requests */
+							switch (req) {
+								case USB_REQ_GET_STATUS: {
+									uint16_t status = 0x0001; /* Device: Self-Powered */
+									bt_usb_ep0_tx(&status, 2);
+									break;
+								}
+								case USB_REQ_GET_DESCRIPTOR: {
+									uint8_t desc_type = (g_setup_pkt.wValue >> 8);
+									uint8_t desc_idx  = (g_setup_pkt.wValue & 0xFF);
+									const uint8_t* ptr = NULL;
+									uint16_t len = 0;
+
+									if (desc_type == USB_DESC_TYPE_DEVICE) {
+										ptr = (const uint8_t*)&dev_desc;
+										len = sizeof(dev_desc);
+									} else if (desc_type == USB_DESC_TYPE_CONFIG) {
+										ptr = (const uint8_t*)&conf_desc;
+										len = sizeof(conf_desc);
+									} else if (desc_type == USB_DESC_TYPE_STRING) {
+										if (desc_idx == 0)      { ptr = (const uint8_t*)&str_lang_desc; len = sizeof(str_lang_desc); }
+										else if (desc_idx == 1) { ptr = (const uint8_t*)&str_mfr_desc;  len = sizeof(str_mfr_desc);  }
+										else if (desc_idx == 2) { ptr = (const uint8_t*)&str_prod_desc; len = sizeof(str_prod_desc); }
+									}
+
+									if (ptr) {
+										if (len > g_setup_pkt.wLength) len = g_setup_pkt.wLength;
+										bt_usb_ep0_tx(ptr, len); 
+									} else {
+										bt_usb_ep0_stall();
+									}
+									break;
+								}
+								default:
+									bt_usb_ep0_stall();
+									break;
+							}
+						} else if ((req_type & 0x60) == 0x20) {
+							if (req == 0x21) { /* GET_LINE_CODING */
+								bt_usb_ep0_tx(&g_line_coding, sizeof(g_line_coding));
+							} else {
+								bt_usb_ep0_stall();
+							}
+						} else {
+							bt_usb_ep0_stall();
+						}
 					}
 				}
 			}
@@ -503,60 +547,6 @@ void bt_usb_tick(void) {
 
 		UINDEX = saved_idx;
 		PICEN = pic;
-	}
-
-	/* Handle incoming SETUP packets (Deferred IN-Data phases only) */
-	if (!g_ep0_setup_ready) return;
-	g_ep0_setup_ready = false;
-
-	uint8_t req_type = g_setup_pkt.bmRequestType;
-	uint8_t req      = g_setup_pkt.bRequest;
-
-	if ((req_type & 0x60) == 0x00) { /* Standard Requests */
-		switch (req) {
-			case USB_REQ_GET_STATUS: {
-				uint16_t status = 0x0001; /* Device: Self-Powered */
-				bt_usb_ep0_tx(&status, 2);
-				break;
-			}
-			case USB_REQ_GET_DESCRIPTOR: {
-				uint8_t desc_type = (g_setup_pkt.wValue >> 8);
-				uint8_t desc_idx  = (g_setup_pkt.wValue & 0xFF);
-				const uint8_t* ptr = NULL;
-				uint16_t len = 0;
-
-				if (desc_type == USB_DESC_TYPE_DEVICE) {
-					ptr = (const uint8_t*)&dev_desc;
-					len = sizeof(dev_desc);
-				} else if (desc_type == USB_DESC_TYPE_CONFIG) {
-					ptr = (const uint8_t*)&conf_desc;
-					len = sizeof(conf_desc);
-				} else if (desc_type == USB_DESC_TYPE_STRING) {
-					if (desc_idx == 0)      { ptr = (const uint8_t*)&str_lang_desc; len = sizeof(str_lang_desc); }
-					else if (desc_idx == 1) { ptr = (const uint8_t*)&str_mfr_desc;  len = sizeof(str_mfr_desc);  }
-					else if (desc_idx == 2) { ptr = (const uint8_t*)&str_prod_desc; len = sizeof(str_prod_desc); }
-				}
-
-				if (ptr) {
-					if (len > g_setup_pkt.wLength) len = g_setup_pkt.wLength;
-					bt_usb_ep0_tx(ptr, len); 
-				} else {
-					bt_usb_ep0_stall();
-				}
-				break;
-			}
-			default:
-				bt_usb_ep0_stall();
-				break;
-		}
-	} else if ((req_type & 0x60) == 0x20) {
-		if (req == 0x21) { /* GET_LINE_CODING */
-			bt_usb_ep0_tx(&g_line_coding, sizeof(g_line_coding));
-		} else {
-			bt_usb_ep0_stall();
-		}
-	} else {
-		bt_usb_ep0_stall();
 	}
 }
 
