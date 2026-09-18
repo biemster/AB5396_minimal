@@ -124,8 +124,7 @@ static int uart0_poll(void) {
 static int ush_read_cb(struct ush_object *self, char *ch)
 {
 	(void)self;
-//	int v = uart0_poll();   /* returns -1 if nothing */
-	int v = bt_cdc_read_char(); /* Non-blocking, returns -1 if empty */
+	int v = bt_cdc_is_connected() ? bt_cdc_read_char() : uart0_poll();
 	if (v < 0) return 0;    /* no data */
 	*ch = (char)(v & 0xff);
 	return 1;               /* a char was read */
@@ -134,8 +133,12 @@ static int ush_read_cb(struct ush_object *self, char *ch)
 static int ush_write_cb(struct ush_object *self, char c)
 {
 	(void)self;
-//	ROM_UART0_PUTCHAR(c);
-	bt_cdc_write_char(c); /* Blocking with safety timeout */
+	if (bt_cdc_is_connected()) {
+		bt_cdc_write_char(c); /* Blocking with safety timeout */
+	}
+	else {
+		ROM_UART0_PUTCHAR(c);
+	}
 	return 1;
 }
 
@@ -174,9 +177,6 @@ int main(void) {
 	isr_vector_table[15] = (void *)usb_isr_wrapper;
 	PICADR = (uint32_t)isr_vector_table;
 
-	/* SysTick enable */
-
-
 	/* Init USB CDC ACM */
 	bt_usb_init();
 	PICPR |= 0x80; // Set interrupt priority/routing for USB
@@ -195,29 +195,27 @@ int main(void) {
 	ush_printf(&g_ush, "~ %s ~\r\n", g_hostname);
 
 	/* main loop: non-blocking service */
-	int cnt = TICK0CNT;
-	int cnt_print = cnt;
 	while (1) {
-		cnt = TICK0CNT;
-		bt_usb_tick();
 		ush_service(&g_ush);
 
 		/* If host enumerated us, process I/O */
-		if (bt_cdc_is_connected()) {
-//			if(cnt_print < cnt) {
-//				bt_cdc_write_char('.');
-//				cnt_print += 10000000;
-//			}
+//		if (bt_cdc_is_connected()) {
+//			bt_cdc_write(g_hostname, 14);
+//			bt_cdc_write_char('[');
+//			bt_cdc_write_char(']');
 //
-//			raw_ep1_send("123456\n\r", 8);
-//			ROM_DELAY(1000000);
-//
-//			int c = bt_cdc_read_char();
+//			bt_cdc_write_char('\n');
+//			bt_cdc_write_char('\r');
+//			int c = '4';//bt_cdc_read_char();
 //			
 //			if (c >= 0) {
 //				/* Loopback formatting: 'a' -> '[a]\r\n' */
-//				// bt_cdc_write_char('[');
+//				bt_cdc_write_char('[');
+//				bt_cdc_write_char('[');
+//				bt_cdc_write_char('[');
 //				bt_cdc_write_char((char)c);
+//				bt_cdc_write_char(']');
+//				bt_cdc_write_char(']');
 //				bt_cdc_write_char(']');
 //				if(c == 't') {
 //					bt_cdc_write(g_hostname, 6);
@@ -225,10 +223,10 @@ int main(void) {
 //				bt_cdc_write_char('\r');
 //				bt_cdc_write_char('\n');
 //			}
-		}
+//		}
 
 		/* other periodic tasks can run here */
-		ROM_DELAY(1000); // degarbles mcu responses somehow
+		ROM_DELAY(100); // unfortunately necessary otherwise output is garbled
 		WDTCON = 10; // feed doggy
 	}
 
