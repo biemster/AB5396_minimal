@@ -1,8 +1,7 @@
 /**
  * @file bluetrum_usb.h
- * @brief Stable Hybrid USB Stack for Bluetrum AB5396 (MUSB HDRC Core)
- *        - Lean tick function (1 cycle when idle)
- *        - DMA executed in thread context to avoid bus arbitration deadlock
+ * @brief USB CDC ACM Stack for Bluetrum AB5396 (Mentor MUSB HDRC Core)
+ *        - Split-context architecture using Interrupt-driven Edge Sync
  */
 
 #ifndef BLUETRUM_USB_H
@@ -15,8 +14,20 @@
 /* ==============================================================================
  * SECTION ATTRIBUTES (RAM EXECUTION)
  * ============================================================================== */
+#ifndef ISR_FUNC
 #define ISR_FUNC     __attribute__((section(".isr")))
+#endif
+
+#ifndef USB_FUNC
 #define USB_FUNC     __attribute__((section(".usb")))
+#endif
+
+/* ==============================================================================
+ * RING BUFFER SIZES (POWER OF TWO)
+ * ============================================================================== */
+#define BT_CDC_RX_BUF_SIZE    256
+#define BT_CDC_TX_BUF_SIZE    256
+#define BT_CDC_TX_TIMEOUT     100000
 
 /* ==============================================================================
  * USB STANDARD DEFINITIONS & STRUCTS
@@ -198,12 +209,25 @@ static const str_mfr_t  str_mfr_desc  = { sizeof(str_mfr_t),  USB_DESC_TYPE_STRI
 static const str_prod_t str_prod_desc = { sizeof(str_prod_t), USB_DESC_TYPE_STRING, {'C','D','C',' ','A','C','M'} };
 
 /* ==============================================================================
- * DRIVER STATE & BUFFERS
+ * DRIVER STATE & HARDWARE BUFFERS (Volatile to prevent CPU caching over DMA)
  * ============================================================================== */
-static uint8_t ep0_buf[64]    __attribute__((aligned(4)));
-static uint8_t ep1_rx_buf[64] __attribute__((aligned(4)));
-static uint8_t ep1_tx_buf[64] __attribute__((aligned(4)));
-static uint8_t ep2_tx_buf[8]  __attribute__((aligned(4)));
+static volatile uint8_t ep0_buf[64]    __attribute__((aligned(4)));
+static volatile uint8_t ep1_rx_buf[64] __attribute__((aligned(4)));
+static volatile uint8_t ep1_tx_buf[64] __attribute__((aligned(4)));
+static volatile uint8_t ep2_tx_buf[8]  __attribute__((aligned(4)));
+
+/* Software Stream FIFOs */
+static volatile uint8_t  g_cdc_rx_buf[BT_CDC_RX_BUF_SIZE];
+static volatile uint16_t g_cdc_rx_head = 0;
+static volatile uint16_t g_cdc_rx_tail = 0;
+
+static volatile uint8_t  g_cdc_tx_buf[BT_CDC_TX_BUF_SIZE];
+static volatile uint16_t g_cdc_tx_head = 0;
+static volatile uint16_t g_cdc_tx_tail = 0;
+
+/* Interrupt-driven sync flags */
+static volatile bool     g_ep1_tx_busy  = false;
+static volatile bool     g_ep1_rx_ready = false;
 
 typedef enum {
 	EP0_STAGE_SETUP,
@@ -233,7 +257,8 @@ USB_FUNC
 static void bt_usb_ep0_tx(const void* data, uint16_t len) {
 	if (len > 64) len = 64; 
 	if (len > 0 && data) {
-		memcpy(ep0_buf, data, len);
+		/* Cast away volatile for the memcpy to work properly */
+		memcpy((void*)ep0_buf, data, len);
 		USBCON2 = len | 0x10000; /* Trigger EP0 DMA */
 	}
 	UINDEX = 0;
@@ -248,6 +273,14 @@ static void bt_usb_ep0_stall(void) {
 
 USB_FUNC
 void bt_usb_init(void) {
+	/* Reset Software FIFOs */
+	g_cdc_rx_head = 0;
+	g_cdc_rx_tail = 0;
+	g_cdc_tx_head = 0;
+	g_cdc_tx_tail = 0;
+	g_ep1_tx_busy = false;
+	g_ep1_rx_ready = false;
+
 	/* Global Bluetrum reset */
 	USBCON0 = 0x20;
 	USBCON1 = 0;
@@ -283,7 +316,8 @@ void bt_usb_init(void) {
 
 	/* Enable hardware interrupts */
 	UINTRUSBE = 0x04; /* Bus Reset */
-	UINTRTX1E = 0x01; /* EP0 Event */
+	UINTRTX1E = 0x03; /* Bit 0: EP0 Event | Bit 1: EP1 TX Done Event */
+	UINTRRX1E = 0x02; /* Bit 1: EP1 RX Packet Ready Event */
 
 	USBCON0 |= 0x04 | 0x02 | 0x78 | 0x01; 
 	USBCON3 = 0x0f;
@@ -297,21 +331,41 @@ ISR_FUNC
 void bt_usb_isr(void) {
 	uint32_t saved_idx = UINDEX;
 
-	uint32_t flags_usb = UINTRUSB; /* 0x218 */
-	uint32_t flags_tx  = UINTRTX1; /* 0x208 */
-	uint32_t flags_rx  = UINTRRX1; /* 0x210 */
+	/* Reading MUSB interrupt registers clears them automatically */
+	uint32_t flags_usb = UINTRUSB;
+	uint32_t flags_tx  = UINTRTX1;
+	uint32_t flags_rx  = UINTRRX1;
 
 	/* USB Bus Reset */
 	if (flags_usb & 0x04) {
 		UFADDR = 0x80;
 		UINDEX = 0;
 		UCSR0 = 0x48;
+		
 		g_pending_address = 0;
 		g_ep0_stage       = EP0_STAGE_SETUP;
 		g_usb_configured  = false;
+
+		g_ep1_tx_busy     = false;
+		g_ep1_rx_ready    = false;
+		g_cdc_rx_head     = 0;
+		g_cdc_rx_tail     = 0;
+		g_cdc_tx_head     = 0;
+		g_cdc_tx_tail     = 0;
+
 		UINTRUSB       = flags_usb; /* Clear flag */
-		UINDEX         = saved_idx;
+		UINDEX = saved_idx;
 		return;
+	}
+
+	/* EP1 RX Packet Ready (Guaranteed Rising Edge Sync) */
+	if (flags_rx & 0x02) {
+		g_ep1_rx_ready = true;
+	}
+
+	/* EP1 TX Packet Completion (Guaranteed Rising Edge Sync) */
+	if (flags_tx & 0x02) {
+		g_ep1_tx_busy = false;
 	}
 
 	/* EP0 Control Event */
@@ -323,24 +377,21 @@ void bt_usb_isr(void) {
 		}
 
 		UINDEX = 0;
-		uint32_t csr0 = UCSR0;
-
-		if (csr0 & 0x01) { /* RxPktRdy */
+		if (UCSR0 & 0x01) { /* RxPktRdy */
 			int count = UCOUNT0;
-
 			if (g_ep0_stage == EP0_STAGE_DATA_OUT) {
 				if (count > 0) {
-					memcpy(&g_line_coding, ep0_buf, count > (int)sizeof(g_line_coding) ? sizeof(g_line_coding) : (size_t)count);
+					memcpy(&g_line_coding, (void*)ep0_buf, count > (int)sizeof(g_line_coding) ? sizeof(g_line_coding) : (size_t)count);
 				}
 				g_ep0_data_ready = true;
 			} else {
 				if (count >= 8) {
-					memcpy(&g_setup_pkt, ep0_buf, 8);
+					memcpy(&g_setup_pkt, (void*)ep0_buf, 8);
 					g_ep0_setup_ready = true;
 				}
 			}
 
-			/* Critical bootrom quirk: ALWAYS pop all bytes from UFIFO0 in both stages */
+			/* Pop UFIFO0 manually advance the state machine */
 			while (count > 0) {
 				(void)UFIFO0;
 				count--;
@@ -362,12 +413,28 @@ void bt_usb_tick(void) {
 	if (g_usb_configured) {
 		/* Protect UINDEX from ISR preemption */
 		uint32_t pic = PICEN;
-		PICEN = pic & ~0x80;
+		PICEN = pic & ~0x80; /* Lock UINDEX mapping */
 		uint32_t saved_idx = UINDEX;
 
-		UINDEX = 1;
-		if (URXCSR1 & 0x01) { /* RxPktRdy */
+		/* -------------------------------------------------------------
+		 * EP1 OUT: Receive Bulk Data from Host
+		 * ------------------------------------------------------------- */
+		if (g_ep1_rx_ready) {
+			g_ep1_rx_ready = false;
+			UINDEX = 1;
+			
 			int rx_count = URXCOUNT1;
+			if (rx_count > 64) rx_count = 64;
+
+			/* Bluetrum DMA already wrote into ep1_rx_buf */
+			for (int i = 0; i < rx_count; i++) {
+				uint16_t next = (g_cdc_rx_head + 1) & (BT_CDC_RX_BUF_SIZE - 1);
+				if (next != g_cdc_rx_tail) {
+					g_cdc_rx_buf[g_cdc_rx_head] = ep1_rx_buf[i];
+					g_cdc_rx_head = next;
+				}
+			}
+
 			while (rx_count > 0) {
 				(void)UFIFO1;
 				rx_count--;
@@ -375,6 +442,25 @@ void bt_usb_tick(void) {
 			/* Re-arm EP1 RX DMA to accept and ACK subsequent packets */
 			USBEP1RXADR = (uint32_t)ep1_rx_buf;
 			URXCSR1 = 0x10;
+		}
+
+		/* -------------------------------------------------------------
+		 * EP1 IN: Flush Pending TX Data to Host
+		 * ------------------------------------------------------------- */
+		if (!g_ep1_tx_busy) {
+			uint16_t count = 0;
+			while ((g_cdc_tx_head != g_cdc_tx_tail) && (count < 64)) {
+				ep1_tx_buf[count++] = g_cdc_tx_buf[g_cdc_tx_tail];
+				g_cdc_tx_tail = (g_cdc_tx_tail + 1) & (BT_CDC_TX_BUF_SIZE - 1);
+			}
+
+			if (count > 0) {
+				g_ep1_tx_busy = true; /* Will be cleared by ISR when physically sent */
+				UINDEX = 1;
+				USBCON2 = count | 0x20000; /* Trigger EP1 DMA */
+				while (USBCON2 & 0x20000); /* Wait for hardware to clear the trigger bit */
+				UTXCSR1 = 0x01;            /* Assert TxPktRdy */
+			}
 		}
 
 		UINDEX = saved_idx;
@@ -410,7 +496,6 @@ void bt_usb_tick(void) {
 				bt_usb_ep0_tx(&status, 2);
 				break;
 			}
-
 			case USB_REQ_GET_DESCRIPTOR: {
 				uint8_t desc_type = (g_setup_pkt.wValue >> 8);
 				uint8_t desc_idx  = (g_setup_pkt.wValue & 0xFF);
@@ -437,24 +522,18 @@ void bt_usb_tick(void) {
 				}
 				break;
 			}
-
 			case USB_REQ_SET_ADDRESS:
 				g_pending_address = (g_setup_pkt.wValue & 0x7F) | 0x80;
 				UINDEX = 0;
 				UCSR0 = 0x48; /* ServicedRxPktRdy | DataEnd */
 				break;
-
 			case USB_REQ_SET_CONFIGURATION:
 				g_usb_configured = true;
 				UINDEX = 0;
 				UCSR0 = 0x48; /* ServicedRxPktRdy | DataEnd */
-
-				/* Arm EP1 RX so incoming data is ACKed immediately */
-				USBEP1RXADR = (uint32_t)ep1_rx_buf;
 				UINDEX = 1;
 				URXCSR1 = 0x10;
 				break;
-
 			default:
 				bt_usb_ep0_stall();
 				break;
@@ -475,6 +554,98 @@ void bt_usb_tick(void) {
 	} else {
 		bt_usb_ep0_stall();
 	}
+}
+
+/* ==============================================================================
+ * CDC ACM APPLICATION API (MICROSHELL INTERFACE)
+ * ============================================================================== */
+
+/**
+ * @brief Checks if the USB device is configured and enumerated by host.
+ */
+USB_FUNC
+static inline bool bt_cdc_is_connected(void) {
+	return g_usb_configured;
+}
+
+/**
+ * @brief Non-blocking read of one character from the CDC stream.
+ * @return Character value (0..255) on success, or -1 if the buffer is empty.
+ */
+USB_FUNC
+int bt_cdc_read_char(void) {
+	if (g_cdc_rx_head == g_cdc_rx_tail) {
+		return -1;
+	}
+
+	uint8_t ch = g_cdc_rx_buf[g_cdc_rx_tail];
+	g_cdc_rx_tail = (g_cdc_rx_tail + 1) & (BT_CDC_RX_BUF_SIZE - 1);
+	return (int)ch;
+}
+
+/**
+ * @brief Blocking write of one character with safety timeout.
+ * @param c Character to transmit.
+ */
+USB_FUNC
+void bt_cdc_write_char(char c) {
+	if (!g_usb_configured) return;
+
+	/* If TX ring buffer is full, wait with safety timeout while driving USB */
+	uint32_t timeout = BT_CDC_TX_TIMEOUT;
+	while (((g_cdc_tx_head + 1) & (BT_CDC_TX_BUF_SIZE - 1)) == g_cdc_tx_tail) {
+		bt_usb_tick();
+		if (--timeout == 0) {
+			/* Timeout: host has halted polling, drop byte to avoid hang */
+			return;
+		}
+	}
+
+	g_cdc_tx_buf[g_cdc_tx_head] = (uint8_t)c;
+	g_cdc_tx_head = (g_cdc_tx_head + 1) & (BT_CDC_TX_BUF_SIZE - 1);
+}
+
+/**
+ * @brief Convenience function to transmit a buffer of bytes.
+ */
+USB_FUNC
+void bt_cdc_write(const void* data, size_t len) {
+	const uint8_t* p = (const uint8_t*)data;
+	while (len--) {
+		bt_cdc_write_char((char)*p++);
+	}
+}
+
+/* FOR DEBUGGING: Direct, synchronous EP1 transmission (BootROM style) */
+USB_FUNC
+void raw_ep1_send(const void *data, uint16_t len) {
+	if (len == 0 || len > 64) return;
+
+	/* 1. Copy directly to DMA buffer */
+	memcpy((void*)ep1_tx_buf, data, len);
+
+	/* 2. Select EP1 */
+	uint32_t pic = PICEN;
+	PICEN = pic & ~0x80;
+	UINDEX = 1;
+
+	/* 3. Wait until hardware has sent any previous packet */
+	while (UTXCSR1 & 0x01);
+
+	/* 4. Trigger DMA */
+	USBEP1TXADR = (uint32_t)ep1_tx_buf;
+	USBCON2 = len | 0x20000;
+
+	/* 5. Set TxPktRdy */
+	UTXCSR1 = 0x01;
+
+	/* 6. BootROM settle delay */
+	for (volatile int d = 0; d < 10; d++);
+
+	/* 7. Wait until the host has ACKed this packet before returning */
+	while (UTXCSR1 & 0x01);
+
+	PICEN = pic;
 }
 
 #endif /* BLUETRUM_USB_H */
