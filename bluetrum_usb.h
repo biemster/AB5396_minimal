@@ -211,10 +211,12 @@ static const str_prod_t str_prod_desc = { sizeof(str_prod_t), USB_DESC_TYPE_STRI
 /* ==============================================================================
  * DRIVER STATE & HARDWARE BUFFERS (Volatile to prevent CPU caching over DMA)
  * ============================================================================== */
-static volatile uint8_t ep0_buf[64]    __attribute__((aligned(4)));
-static volatile uint8_t ep1_rx_buf[64] __attribute__((aligned(4)));
-static volatile uint8_t ep1_tx_buf[64] __attribute__((aligned(4)));
-static volatile uint8_t ep2_tx_buf[8]  __attribute__((aligned(4)));
+#define BT_USB_DPRAM_BASE 0x1E000
+/* Map directly to the hardware-dedicated DPRAM just like the BootROM does */
+static volatile uint8_t* const ep1_tx_buf = (volatile uint8_t*)(BT_USB_DPRAM_BASE + 0x000);
+static volatile uint8_t* const ep1_rx_buf = (volatile uint8_t*)(BT_USB_DPRAM_BASE + 0x100);
+static volatile uint8_t* const ep0_buf    = (volatile uint8_t*)(BT_USB_DPRAM_BASE + 0x200);
+static volatile uint8_t* const ep2_tx_buf = (volatile uint8_t*)(BT_USB_DPRAM_BASE + 0x300);
 
 /* Software Stream FIFOs */
 static volatile uint8_t  g_cdc_rx_buf[BT_CDC_RX_BUF_SIZE];
@@ -236,7 +238,6 @@ typedef enum {
 
 static volatile ep0_stage_t g_ep0_stage       = EP0_STAGE_SETUP;
 static volatile bool        g_ep0_setup_ready = false;
-static volatile bool        g_ep0_data_ready  = false;
 static volatile bool        g_usb_configured  = false;
 
 static bt_usb_setup_packet_t g_setup_pkt;
@@ -300,10 +301,12 @@ void bt_usb_init(void) {
 	UTXMAXP = 8;    /* 64 bytes (64 >> 3) */
 	UTXCSR1 = 0x48; /* ClrDataTog | FlushFIFO */
 	UTXCSR2 = 0x20; /* Mode = TX */
+	UTXTYPE = 0x21; /* Protocol Bulk (0b10 << 4) | Target EP1 (need to figure out what to write there for non-Bulk endpoints) */
 
 	URXMAXP = 8;    /* 64 bytes (64 >> 3) */
 	URXCSR1 = 0x90; /* ClrDataTog | FlushFIFO */
 	URXCSR2 = 0x00; /* Mode = RX */
+	URXTYPE = 0x21; /* Protocol Bulk (0b10 << 4) | Target EP1 (need to figure out what to write there for non-Bulk endpoints) */
 
 	UINDEX = 2;
 	UTXMAXP = 1;    /* 8 bytes (8 >> 3) */
@@ -379,22 +382,57 @@ void bt_usb_isr(void) {
 		UINDEX = 0;
 		if (UCSR0 & 0x01) { /* RxPktRdy */
 			int count = UCOUNT0;
+			
+			/* 1. Extract data from DMA buffer (already filled by hardware) */
 			if (g_ep0_stage == EP0_STAGE_DATA_OUT) {
 				if (count > 0) {
 					memcpy(&g_line_coding, (void*)ep0_buf, count > (int)sizeof(g_line_coding) ? sizeof(g_line_coding) : (size_t)count);
 				}
-				g_ep0_data_ready = true;
 			} else {
 				if (count >= 8) {
 					memcpy(&g_setup_pkt, (void*)ep0_buf, 8);
-					g_ep0_setup_ready = true;
 				}
 			}
 
-			/* Pop UFIFO0 manually advance the state machine */
-			while (count > 0) {
+			/* 2. Pop UFIFO0 to physically clear the hardware FIFO *BEFORE* clearing RxPktRdy */
+			int pop_count = count;
+			while (pop_count > 0) {
 				(void)UFIFO0;
-				count--;
+				pop_count--;
+			}
+
+			/* 3. Advance state machine by writing to UCSR0 */
+			if (g_ep0_stage == EP0_STAGE_DATA_OUT) {
+				UCSR0 = 0x48; /* ServicedRxPktRdy | DataEnd */
+				g_ep0_stage = EP0_STAGE_SETUP;
+			} else {
+				if (count >= 8) {
+					uint8_t req_type = g_setup_pkt.bmRequestType;
+					uint8_t req      = g_setup_pkt.bRequest;
+
+					if ((req_type & 0x60) == 0x00 && req == USB_REQ_SET_ADDRESS) {
+						g_pending_address = (g_setup_pkt.wValue & 0x7F) | 0x80;
+						UCSR0 = 0x48;
+					}
+					else if ((req_type & 0x60) == 0x00 && req == USB_REQ_SET_CONFIGURATION) {
+						g_usb_configured = true;
+						UCSR0 = 0x48;
+						UINDEX = 1;
+						URXCSR1 = 0x10;
+						UINDEX = 0; /* Restore UINDEX to EP0 */
+					}
+					else if ((req_type & 0x60) == 0x20 && req == 0x20) { /* SET_LINE_CODING */
+						UCSR0 = 0x40; /* ServicedRxPktRdy ONLY */
+						g_ep0_stage = EP0_STAGE_DATA_OUT;
+					}
+					else if ((req_type & 0x60) == 0x20 && req == 0x22) { /* SET_CTRL_LINE_STATE */
+						UCSR0 = 0x48;
+					}
+					else {
+						/* Defer IN-data transfers (GET_DESC, GET_STATUS) to the tick function for now */
+						g_ep0_setup_ready = true;
+					}
+				}
 			}
 		}
 		UINTRTX1 = flags_tx;
@@ -467,18 +505,7 @@ void bt_usb_tick(void) {
 		PICEN = pic;
 	}
 
-	/* Handle second-stage OUT data for SET_LINE_CODING */
-	if (g_ep0_data_ready) {
-		g_ep0_data_ready = false;
-		if (g_ep0_stage == EP0_STAGE_DATA_OUT) {
-			UINDEX = 0;
-			UCSR0 = 0x48; /* ServicedRxPktRdy | DataEnd */
-			g_ep0_stage = EP0_STAGE_SETUP;
-		}
-		return;
-	}
-
-	/* Handle incoming SETUP packets (Single-cycle check when idle) */
+	/* Handle incoming SETUP packets (Deferred IN-Data phases only) */
 	if (!g_ep0_setup_ready) return;
 	g_ep0_setup_ready = false;
 
@@ -488,11 +515,7 @@ void bt_usb_tick(void) {
 	if ((req_type & 0x60) == 0x00) { /* Standard Requests */
 		switch (req) {
 			case USB_REQ_GET_STATUS: {
-				uint16_t status = 0x0000;
-				uint8_t recipient = req_type & 0x1F;
-				if (recipient == 0x00) {
-					status = 0x0001; /* Device: Self-Powered */
-				}
+				uint16_t status = 0x0001; /* Device: Self-Powered */
 				bt_usb_ep0_tx(&status, 2);
 				break;
 			}
@@ -522,32 +545,13 @@ void bt_usb_tick(void) {
 				}
 				break;
 			}
-			case USB_REQ_SET_ADDRESS:
-				g_pending_address = (g_setup_pkt.wValue & 0x7F) | 0x80;
-				UINDEX = 0;
-				UCSR0 = 0x48; /* ServicedRxPktRdy | DataEnd */
-				break;
-			case USB_REQ_SET_CONFIGURATION:
-				g_usb_configured = true;
-				UINDEX = 0;
-				UCSR0 = 0x48; /* ServicedRxPktRdy | DataEnd */
-				UINDEX = 1;
-				URXCSR1 = 0x10;
-				break;
 			default:
 				bt_usb_ep0_stall();
 				break;
 		}
-	} else if ((req_type & 0x60) == 0x20) { /* CDC Class Requests */
-		if (req == 0x20) { /* SET_LINE_CODING: Expect 7 bytes of OUT data */
-			UINDEX = 0;
-			UCSR0 = 0x40; /* ServicedRxPktRdy ONLY */
-			g_ep0_stage = EP0_STAGE_DATA_OUT;
-		} else if (req == 0x21) { /* GET_LINE_CODING: Send 7 bytes */
+	} else if ((req_type & 0x60) == 0x20) {
+		if (req == 0x21) { /* GET_LINE_CODING */
 			bt_usb_ep0_tx(&g_line_coding, sizeof(g_line_coding));
-		} else if (req == 0x22) { /* SET_CONTROL_LINE_STATE: No data stage */
-			UINDEX = 0;
-			UCSR0 = 0x48; /* ServicedRxPktRdy | DataEnd */
 		} else {
 			bt_usb_ep0_stall();
 		}
