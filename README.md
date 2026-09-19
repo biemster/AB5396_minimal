@@ -54,7 +54,7 @@ python ../bluetrum-tools/download.py --port /dev/ttyACM0 --baud 115200 write 0x1
 - [x] Run from flash
 - [x] Run from XIP flash
 - [x] microshell
-- [ ] USB stack
+- [x] USB stack
 - [ ] RF stack
 
 ### resources

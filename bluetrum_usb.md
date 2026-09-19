@@ -4,7 +4,7 @@
 
 The USB peripheral on Bluetrum BLE SoCs (such as the AB5396) consists of an industry-standard **Mentor Graphics Inventra MUSB (MHDRC)** controller core wrapped by a **Bluetrum proprietary DMA streaming engine**.
 
-```
+```text
   ┌─────────────────────────────────────────────────────────────┐
   │                 Bluetrum System Bus (AHB)                   │
   └──────────────┬───────────────────────────────┬──────────────┘
@@ -102,7 +102,7 @@ Writing to this register begins an automatic memory-to-FIFO (or FIFO-to-memory) 
 ### 2.3 Indexed Endpoint Register Window (`0x240 - 0x26C`)
 The registers at offsets `0x240` through `0x26C` are dynamically mapped to the endpoint number set in **`UINDEX` (`0x238`)**.
 
-```
+```text
 UINDEX == 0 (Endpoint 0 Window):
   0x244 -> UCSR0
   0x258 -> UCOUNT0
@@ -159,7 +159,7 @@ UINDEX >= 1 (Generic Endpoints 1..15 Window):
 #### `UTXMAXP` / `URXMAXP` (`0x240` / `0x24C`, when `UINDEX >= 1`)
 Defines the maximum packet payload size in 8-byte increments:
 $$\text{Register Value} = \frac{\text{Max Packet Size in Bytes}}{8}$$
-*(e.g., 64 bytes $\rightarrow$ `64 >> 3 = 8`; 8 bytes $\rightarrow$ `8 >> 3 = 1`).*
+*(For 32 bytes $\rightarrow$ `32 >> 3 = 4`; for 8 bytes $\rightarrow$ `8 >> 3 = 1`).*
 
 ---
 
@@ -179,40 +179,41 @@ $$\text{Register Value} = \frac{\text{Max Packet Size in Bytes}}{8}$$
 
 ### 3.1 The `UINDEX` Preemption Race Condition
 The registers at `0x240..0x26C` are an indexed window controlled by `UINDEX` (`0x238`).
-* If `main()` sets `UINDEX = 1` to transmit on EP1, and an interrupt preempts it to service EP0, the ISR writes `UINDEX = 0`.
-* When the ISR returns, `main()` continues, writing to `0x244` under the assumption that it is addressing `UTXCSR1`. It actually overwrites `UCSR0`, corrupting EP0 control and dropping EP1 frames.
+Every ISR entry must save `UINDEX` and restore it upon exit. Main-thread accesses to indexed registers must disable the USB interrupt via `PICEN` to prevent the ISR from swapping the window during execution.
 
-**The Rule:**
-1. Every ISR entry must save `UINDEX` and restore it upon exit.
-2. Main-thread accesses to indexed registers must disable the USB interrupt via `BT_PICEN`:
-```c
-uint32_t pic = BT_PICEN;
-BT_PICEN = pic & ~0x80; /* Disable USB IRQ */
-uint32_t saved = BT_UINDEX;
+### 3.2 The DMA Bus-Arbitration Constraint & CPU Starvation
+The internal AHB bus arbiter on the AB5396 prioritizes the CPU during instruction fetches and within machine-mode interrupt context. This causes two critical failure modes:
+1. **EP0 Descriptor Aborts during Enumeration:** If `main()` executes a tight zero-wait loop (`while(1)`) without yielding the bus, the CPU continuously saturates AHB arbitrations. When the host issues an EP0 IN token, the DMA cannot burst descriptor data into `UFIFO0` in time, causing host timeouts and `EPROTO` (`-71`) enumeration failures.
+2. **TX Burst Desynchronization:** Asserting `UTXCSR1 = 0x01` (`TxPktRdy`) immediately after triggering `USBCON2` can signal packet readiness before the DMA has physically completed its write burst across the bus.
 
-BT_UINDEX = target_ep;
-/* ... execute endpoint register operations ... */
+**The Solution:**
+* The event loop in `main()` must yield the bus (using small pacing delays, `wfi`, or a cooperative delay loop).
+* Software must insert a tiny execution barrier of ~10–15 CPU cycles (`delay(3)` in the BootROM at `0x00080284`) immediately after asserting `UTXCSR1 = 0x01` to allow the memory pipeline and MUSB latch to settle.
 
-BT_UINDEX = saved;
-BT_PICEN = pic;         /* Restore USB IRQ */
+### 3.3 Asymmetric Hardware FIFO Sizing and RAM Banking
+Bluetrum allocates 64 bytes total of physical SRAM to the generic endpoint FIFOs. The MUSB core splits this into **two 32-byte Double Packet Buffering (DPB) banks**.
+
+Critically, **RX and TX behave asymmetrically** with respect to the Bluetrum DMA engine:
+
+```text
+  RX PATH (Hardware-Driven Banking):
+  ──────────────────────────────────
+  Packet 1 (Bank 0) ──► Hardware DMA ──► USBEP1RXADR + 0x00
+  Packet 2 (Bank 1) ──► Hardware DMA ──► USBEP1RXADR + 0x20
+  (Software MUST toggle a pointer: g_rx_bank ^= 1)
+
+  TX PATH (Software-Driven, No Auto-Banking):
+  ──────────────────────────────────────────
+  Any Packet ────────► Hardware DMA ──► USBEP1TXADR + 0x00
+  (DMA always streams strictly from USBEP1TXADR; software must NOT alternate offsets)
 ```
 
----
-
-### 3.2 The DMA Bus-Arbitration Constraint (Why Pure ISR Mode Fails)
-If software attempts to complete a control transfer by calling `bt_usb_ep0_tx()` inside `bt_usb_isr()`, the host aborts with:
-```
-usb 1-4: device descriptor read/64, error -71
-```
-
-**Root Cause:**
-1. The AB5396 bus matrix locks priority to the CPU while executing within machine-mode interrupt context.
-2. When `BT_USBCON2 = len | 0x10000;` triggers the DMA engine, the DMA cannot burst data from `ep0_buf` into `UFIFO0` while the CPU is still holding the bus.
-3. The CPU immediately executes `BT_UCSR0 = 0x0A;` (`TxPktRdy`), signaling the MUSB transceiver that valid data is in the FIFO.
-4. The host issues an IN token, reads an empty or incomplete FIFO, and flags an `EPROTO` (`-71`) protocol error.
-
-**The Solution (Hybrid Architecture):**
-The ISR latches SETUP packets and drains `UFIFO0`, then marks a flag (`g_ep0_setup_ready`). The transfer is initiated in thread context (`bt_usb_tick()`) after `mret` releases bus mastery.
+1. **RX Path (Auto-Offsetting):** The DMA engine automatically routes incoming packets to alternating 32-byte RAM addresses:
+   * **Bank 0:** `USBEP1RXADR + 0x00`
+   * **Bank 1:** `USBEP1RXADR + 0x20`
+   Software **must track `g_rx_bank`** to read incoming data from alternating 32-byte slices.
+2. **TX Path (Strict Base Addressing):** The TX DMA controller does *not* auto-bank. It reads directly and strictly from the base physical address programmed into `USBEP1TXADR`. If software attempts to alternate TX payloads between `+0x00` and `+0x20`, the DMA will re-read `+0x00` on every packet, sending even characters twice and dropping odd characters completely (`dd----..//$$ll`).
+3. **Payload Limits:** Both directions must cap maximum transfer units at **32 bytes** (`wMaxPacketSize = 32`, `UTXMAXP = 4`, `URXMAXP = 4`) to prevent buffer overruns into adjacent endpoint regions.
 
 ---
 
@@ -322,11 +323,13 @@ Registers `0x264` (`UTXINTERVAL`) and `0x26C` (`URXINTERVAL`) configure the tran
 
 #### Configuring Endpoint 1 as Bulk IN / Bulk OUT (CDC Data)
 ```c
+/* Ensure descriptor wMaxPacketSize is set to 0x0020 (32 bytes) */
+
 /* Select EP1 */
 BT_UINDEX = 1;
 
 /* Configure Bulk IN (TX) */
-BT_UTXMAXP = 64 >> 3;  /* 64 bytes */
+BT_UTXMAXP = 4;        /* 32 bytes (32 >> 3) */
 BT_UTXCSR1 = 0x48;     /* Clear data toggle, flush FIFO */
 BT_UTXCSR2 = 0x20;     /* Mode = TX */
 BT_UTXTYPE = 0x21;     /* Bulk transfer (0b10 << 4) | EP1 */
@@ -334,7 +337,7 @@ BT_UTXINTERVAL = 0;
 BT_USBEP1TXADR = (uint32_t)ep1_tx_buf;
 
 /* Configure Bulk OUT (RX) */
-BT_URXMAXP = 64 >> 3;  /* 64 bytes */
+BT_URXMAXP = 4;        /* 32 bytes (32 >> 3) */
 BT_URXCSR1 = 0x90;     /* Clear data toggle, flush FIFO */
 BT_URXCSR2 = 0x00;     /* Mode = RX */
 BT_URXTYPE = 0x21;     /* Bulk transfer (0b10 << 4) | EP1 */
@@ -366,64 +369,72 @@ While the MUSB core supports Isochronous mode, the behavior of Bluetrum's DMA wr
 
 ### 5.4 Data Transmission and Reception
 
-#### Transmitting Data (Bulk / Interrupt IN)
+Software tracks the hardware RX toggle globally:
 ```c
-void ep_tx(uint8_t ep_num, const void *data, uint16_t len) {
+static volatile uint8_t g_rx_bank = 0;
+```
+
+#### Transmitting Data (Bulk IN)
+TX always writes to base `ep1_tx_buf` (`+0x00`), restricted to a maximum of 32 bytes, followed by the pipeline arbitration delay:
+
+```c
+void ep1_tx_kick(void) {
+    uint16_t count = 0;
+
+    /* 1. Always fill from base USB buffer address, up to 32 bytes max */
+    while ((g_cdc_tx_head != g_cdc_tx_tail) && (count < 32)) {
+        ep1_tx_buf[count++] = g_cdc_tx_buf[g_cdc_tx_tail];
+        g_cdc_tx_tail = (g_cdc_tx_tail + 1) & (BT_CDC_TX_BUF_SIZE - 1);
+    }
+
+    if (count == 0) {
+        g_ep1_tx_busy = false;
+        return;
+    }
+
     uint32_t pic = BT_PICEN;
-    BT_PICEN = pic & ~0x80; /* Disable USB IRQ to avoid UINDEX corruption */
-    uint32_t saved = BT_UINDEX;
+    BT_PICEN = pic & ~0x80;
+    uint32_t saved_idx = BT_UINDEX;
 
-    BT_UINDEX = ep_num;
+    BT_UINDEX = 1;
 
-    /* Wait for previous packet completion (TxPktRdy clears when ACKed) */
-    while (BT_UTXCSR1 & 0x01);
+    /* 2. DMA always bursts from base */
+    BT_USBEP1TXADR = (uint32_t)ep1_tx_buf;
+    BT_USBCON2 = count | 0x20000; 
 
-    memcpy(tx_buffer, data, len);
+    /* Wait for DMA burst completion */
+    while (BT_USBCON2 & 0x20000); 
 
-    /* Point DMA and trigger transfer: Bit (16 + ep_num) */
-    BT_USBEP1TXADR = (uint32_t)tx_buffer;
-    BT_USBCON2 = len | (1 << (16 + ep_num));
-
-    /* Mark packet ready */
+    /* 3. Signal packet ready to MUSB core */
     BT_UTXCSR1 = 0x01;
 
-    BT_UINDEX = saved;
+    BT_UINDEX = saved_idx;
     BT_PICEN = pic;
+
+    /* 4. Bus arbitration barrier (matching BootROM delay(3), ~10-15 cycles) */
+    for (volatile int d = 0; d < 6; d++);
 }
 ```
 
 #### Receiving Data (Bulk OUT)
+RX reads from alternating 32-byte RAM offsets (`+0x00` vs `+0x20`) on every packet:
+
 ```c
-int ep_rx(uint8_t ep_num, void *dest, uint16_t max_len) {
-    int received = 0;
-    uint32_t pic = BT_PICEN;
-    BT_PICEN = pic & ~0x80;
-    uint32_t saved = BT_UINDEX;
+/* Inside ISR when URXCSR1 & 0x01 (RxPktRdy) is asserted: */
+int rx_count = BT_URXCOUNT1;
+if (rx_count > 32) rx_count = 32;
 
-    BT_UINDEX = ep_num;
+/* Pick active hardware bank */
+volatile uint8_t *src = (g_rx_bank == 0) ? (ep1_rx_buf + 0x00) 
+                                         : (ep1_rx_buf + 0x20);
+g_rx_bank ^= 1;
 
-    if (BT_URXCSR1 & 0x01) { /* RxPktRdy asserted */
-        uint16_t count = (BT_URXCOUNT1 & 0xFF) | ((BT_URXCOUNT2 & 0x07) << 8);
-        if (count > max_len) count = max_len;
-
-        memcpy(dest, rx_buffer, count);
-        received = count;
-
-        /* Drain hardware FIFO */
-        while (count > 0) {
-            (void)BT_UFIFO1;
-            count--;
-        }
-
-        /* Re-arm DMA and clear RxPktRdy */
-        BT_USBEP1RXADR = (uint32_t)rx_buffer;
-        BT_URXCSR1 = 0x10; /* Writing 0x10 re-arms Bluetrum RX DMA */
-    }
-
-    BT_UINDEX = saved;
-    BT_PICEN = pic;
-    return received;
+for (int i = 0; i < rx_count; i++) {
+    process_byte(src[i]);
 }
+
+BT_USBEP1RXADR = (uint32_t)ep1_rx_buf;
+BT_URXCSR1 = 0x10; /* Re-arm Bluetrum DMA */
 ```
 
 ---
@@ -465,97 +476,49 @@ void bt_usb_isr(void) {
     if (flags_usb & 0x04) {
         BT_UFADDR = 0x80;
         BT_UINDEX = 0;
-        BT_UCSR0 = 0x48;
-        g_pending_address = 0;
-        g_ep0_stage = EP0_STAGE_SETUP;
+        BT_UCSR0  = 0x48;
+
+        g_rx_bank = 0; /* Hardware FIFO banks reset to Bank 0 */
+        g_ep1_tx_busy = false;
+
         BT_UINTRUSB = flags_usb;
         BT_UINDEX = saved_idx;
         return;
     }
 
-    /* Handle Endpoint 0 Interrupt */
-    if (flags_tx & 0x01) {
-        if (g_pending_address) {
-            BT_UFADDR = g_pending_address;
-            g_pending_address = 0;
-        }
+    /* EP1 RX Packet Ready */
+    if (flags_rx & 0x02) {
+        BT_UINDEX = 1;
+        if (BT_URXCSR1 & 0x01) {
+            int rx_count = BT_URXCOUNT1;
+            if (rx_count > 32) rx_count = 32;
 
-        BT_UINDEX = 0;
-        uint32_t csr0 = BT_UCSR0;
+            volatile uint8_t *src = (g_rx_bank == 0) ? (ep1_rx_buf + 0x00) 
+                                                     : (ep1_rx_buf + 0x20);
+            g_rx_bank ^= 1;
 
-        if (csr0 & 0x01) { /* RxPktRdy */
-            int count = BT_UCOUNT0;
-
-            if (g_ep0_stage == EP0_STAGE_DATA_OUT) {
-                if (count > 0) {
-                    memcpy(&g_line_coding, ep0_buf, count > 7 ? 7 : count);
-                }
-                g_ep0_data_ready = true;
-            } else {
-                if (count >= 8) {
-                    memcpy(&g_setup_pkt, ep0_buf, 8);
-                    g_ep0_setup_ready = true;
+            for (int i = 0; i < rx_count; i++) {
+                uint16_t next = (g_cdc_rx_head + 1) & (BT_CDC_RX_BUF_SIZE - 1);
+                if (next != g_cdc_rx_tail) {
+                    g_cdc_rx_buf[g_cdc_rx_head] = src[i];
+                    g_cdc_rx_head = next;
                 }
             }
 
-            /* Drain UFIFO0 */
-            while (count > 0) {
-                (void)BT_UFIFO0;
-                count--;
-            }
+            BT_USBEP1RXADR = (uint32_t)ep1_rx_buf;
+            BT_URXCSR1 = 0x10; /* Re-arm */
         }
-        BT_UINTRTX1 = flags_tx;
+        BT_UINTRRX1 = flags_rx;
     }
 
-    if (flags_rx) {
-        BT_UINTRRX1 = flags_rx;
+    /* EP1 TX Packet Completion */
+    if (flags_tx & 0x02) {
+        ep1_tx_kick();
+        BT_UINTRTX1 = flags_tx;
     }
 
     BT_UINDEX = saved_idx;
 }
 ```
 
-### 6.2 Main Loop Worker Reference Implementation
-```c
-BT_USB_FUNC
-void bt_usb_tick(void) {
-    /* 1. EP1 OUT Drain (Prevents screen/terminal exit lockups) */
-    if (g_usb_configured) {
-        uint32_t pic = BT_PICEN;
-        BT_PICEN = pic & ~0x80;
-        uint32_t saved_idx = BT_UINDEX;
-
-        BT_UINDEX = 1;
-        if (BT_URXCSR1 & 0x01) {
-            int rx_count = BT_URXCOUNT1;
-            while (rx_count > 0) {
-                (void)BT_UFIFO1;
-                rx_count--;
-            }
-            BT_USBEP1RXADR = (uint32_t)ep1_rx_buf;
-            BT_URXCSR1 = 0x10;
-        }
-
-        BT_UINDEX = saved_idx;
-        BT_PICEN = pic;
-    }
-
-    /* 2. Control OUT Data Stage Handling */
-    if (g_ep0_data_ready) {
-        g_ep0_data_ready = false;
-        if (g_ep0_stage == EP0_STAGE_DATA_OUT) {
-            BT_UINDEX = 0;
-            BT_UCSR0 = 0x48; /* ServicedRxPktRdy | DataEnd */
-            g_ep0_stage = EP0_STAGE_SETUP;
-        }
-        return;
-    }
-
-    /* 3. Fast Exit if No Setup Packet Arrived */
-    if (!g_ep0_setup_ready) return;
-    g_ep0_setup_ready = false;
-
-    /* Execute standard enumeration decode (GET_DESCRIPTOR, SET_ADDRESS, etc.) */
-    decode_and_respond(&g_setup_pkt);
-}
-```
+*(Note: `g_rx_bank = 0;` must also be executed inside the EP0 `SET_CONFIGURATION` handler to stay synchronized with the core's data toggle/bank reset).*

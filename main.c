@@ -5,6 +5,9 @@
 #include "bluetrum_usb.h"
 
 /* ROM prototypes */
+typedef void (*rom_usb_bootloader)(void);
+#define ROM_USB_BOOTLOADER ((rom_usb_bootloader)0x00080c44)
+
 typedef void (*rom_clock_init)(void);
 #define ROM_CLOCK_INIT ((rom_clock_init)0x00080b94)
 
@@ -121,8 +124,7 @@ static int uart0_poll(void) {
 static int ush_read_cb(struct ush_object *self, char *ch)
 {
 	(void)self;
-	int v = uart0_poll();   /* returns -1 if nothing */
-//	int v = bt_cdc_read_char(); /* Non-blocking, returns -1 if empty */
+	int v = bt_cdc_is_connected() ? bt_cdc_read_char() : uart0_poll();
 	if (v < 0) return 0;    /* no data */
 	*ch = (char)(v & 0xff);
 	return 1;               /* a char was read */
@@ -131,8 +133,12 @@ static int ush_read_cb(struct ush_object *self, char *ch)
 static int ush_write_cb(struct ush_object *self, char c)
 {
 	(void)self;
-	ROM_UART0_PUTCHAR(c);
-//	bt_cdc_write_char(c); /* Blocking with safety timeout */
+	if (bt_cdc_is_connected()) {
+		bt_cdc_write_char(c); /* Blocking with safety timeout */
+	}
+	else {
+		ROM_UART0_PUTCHAR(c);
+	}
 	return 1;
 }
 
@@ -191,9 +197,9 @@ int main(void) {
 	/* main loop: non-blocking service */
 	while (1) {
 		ush_service(&g_ush);
-		bt_usb_tick();
 
 		/* other periodic tasks can run here */
+		ROM_DELAY(100); // don't starve DMA masters (for USB for example)
 		WDTCON = 10; // feed doggy
 	}
 

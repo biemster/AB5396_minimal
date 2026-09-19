@@ -1,8 +1,7 @@
 /**
  * @file bluetrum_usb.h
- * @brief Stable Hybrid USB Stack for Bluetrum AB5396 (MUSB HDRC Core)
- *        - Lean tick function (1 cycle when idle)
- *        - DMA executed in thread context to avoid bus arbitration deadlock
+ * @brief USB CDC ACM Stack for Bluetrum AB5396 (Mentor MUSB HDRC Core)
+ *        - Split-context architecture using Interrupt-driven Edge Sync
  */
 
 #ifndef BLUETRUM_USB_H
@@ -15,8 +14,20 @@
 /* ==============================================================================
  * SECTION ATTRIBUTES (RAM EXECUTION)
  * ============================================================================== */
+#ifndef ISR_FUNC
 #define ISR_FUNC     __attribute__((section(".isr")))
+#endif
+
+#ifndef USB_FUNC
 #define USB_FUNC     __attribute__((section(".usb")))
+#endif
+
+/* ==============================================================================
+ * RING BUFFER SIZES (POWER OF TWO)
+ * ============================================================================== */
+#define BT_CDC_RX_BUF_SIZE    256
+#define BT_CDC_TX_BUF_SIZE    256
+#define BT_CDC_TX_TIMEOUT     100000
 
 /* ==============================================================================
  * USB STANDARD DEFINITIONS & STRUCTS
@@ -176,7 +187,7 @@ static const cdc_config_descriptor_t conf_desc = {
 		.bDescriptorType     = 0x05,
 		.bEndpointAddress    = 0x01,
 		.bmAttributes        = 0x02, /* Bulk OUT */
-		.wMaxPacketSize      = 0x0040,
+		.wMaxPacketSize      = 0x0020, /* 32 bytes to match physical bank size */
 		.bInterval           = 0x00
 	},
 	.ep1_in = {
@@ -198,12 +209,28 @@ static const str_mfr_t  str_mfr_desc  = { sizeof(str_mfr_t),  USB_DESC_TYPE_STRI
 static const str_prod_t str_prod_desc = { sizeof(str_prod_t), USB_DESC_TYPE_STRING, {'C','D','C',' ','A','C','M'} };
 
 /* ==============================================================================
- * DRIVER STATE & BUFFERS
+ * DRIVER STATE & HARDWARE BUFFERS (Volatile to prevent CPU caching over DMA)
  * ============================================================================== */
 static uint8_t ep0_buf[64]    __attribute__((aligned(4)));
 static uint8_t ep1_rx_buf[64] __attribute__((aligned(4)));
 static uint8_t ep1_tx_buf[64] __attribute__((aligned(4)));
 static uint8_t ep2_tx_buf[8]  __attribute__((aligned(4)));
+
+/* USB EP1 Double-Buffering Hardware Bank Tracker */
+static volatile uint8_t  g_rx_bank = 0;
+
+/* Software Stream FIFOs */
+static volatile uint8_t  g_cdc_rx_buf[BT_CDC_RX_BUF_SIZE];
+static volatile uint16_t g_cdc_rx_head = 0;
+static volatile uint16_t g_cdc_rx_tail = 0;
+
+static volatile uint8_t  g_cdc_tx_buf[BT_CDC_TX_BUF_SIZE];
+static volatile uint16_t g_cdc_tx_head = 0;
+static volatile uint16_t g_cdc_tx_tail = 0;
+
+/* Interrupt-driven sync flags */
+static volatile bool     g_ep1_tx_busy  = false;
+static volatile bool     g_ep1_rx_ready = false;
 
 typedef enum {
 	EP0_STAGE_SETUP,
@@ -211,8 +238,6 @@ typedef enum {
 } ep0_stage_t;
 
 static volatile ep0_stage_t g_ep0_stage       = EP0_STAGE_SETUP;
-static volatile bool        g_ep0_setup_ready = false;
-static volatile bool        g_ep0_data_ready  = false;
 static volatile bool        g_usb_configured  = false;
 
 static bt_usb_setup_packet_t g_setup_pkt;
@@ -230,24 +255,16 @@ static usb_cdc_line_coding_t g_line_coding = {
  * ============================================================================== */
 
 USB_FUNC
-static void bt_usb_ep0_tx(const void* data, uint16_t len) {
-	if (len > 64) len = 64; 
-	if (len > 0 && data) {
-		memcpy(ep0_buf, data, len);
-		USBCON2 = len | 0x10000; /* Trigger EP0 DMA */
-	}
-	UINDEX = 0;
-	UCSR0 = 0x0A; /* TxPktRdy (0x02) | DataEnd (0x08) */
-}
-
-USB_FUNC
-static void bt_usb_ep0_stall(void) { 
-	UINDEX = 0;
-	UCSR0 = 0x20; /* SendStall (Bit 5 in CSR0) */
-}
-
-USB_FUNC
 void bt_usb_init(void) {
+	/* Reset Software FIFOs */
+	g_cdc_rx_head  = 0;
+	g_cdc_rx_tail  = 0;
+	g_cdc_tx_head  = 0;
+	g_cdc_tx_tail  = 0;
+	g_ep1_tx_busy  = false;
+	g_ep1_rx_ready = false;
+	g_rx_bank      = 0; /* Reset Bank toggle */
+
 	/* Global Bluetrum reset */
 	USBCON0 = 0x20;
 	USBCON1 = 0;
@@ -264,13 +281,15 @@ void bt_usb_init(void) {
 
 	/* Configure EP1/EP2 descriptors in MUSB to quiet the bus */
 	UINDEX = 1;
-	UTXMAXP = 8;    /* 64 bytes (64 >> 3) */
+	UTXMAXP = 4;    /* 32 bytes (32 >> 3), is max on this chip */
 	UTXCSR1 = 0x48; /* ClrDataTog | FlushFIFO */
 	UTXCSR2 = 0x20; /* Mode = TX */
+	UTXTYPE = 0x21; /* Protocol Bulk (0b10 << 4) | Target EP1 (need to figure out what to write there for non-Bulk endpoints) */
 
-	URXMAXP = 8;    /* 64 bytes (64 >> 3) */
+	URXMAXP = 4;    /* 32 bytes (32 >> 3), is max on this chip */
 	URXCSR1 = 0x90; /* ClrDataTog | FlushFIFO */
 	URXCSR2 = 0x00; /* Mode = RX */
+	URXTYPE = 0x21; /* Protocol Bulk (0b10 << 4) | Target EP1 (need to figure out what to write there for non-Bulk endpoints) */
 
 	UINDEX = 2;
 	UTXMAXP = 1;    /* 8 bytes (8 >> 3) */
@@ -283,7 +302,8 @@ void bt_usb_init(void) {
 
 	/* Enable hardware interrupts */
 	UINTRUSBE = 0x04; /* Bus Reset */
-	UINTRTX1E = 0x01; /* EP0 Event */
+	UINTRTX1E = 0x03; /* Bit 0: EP0 Event | Bit 1: EP1 TX Done Event */
+	UINTRRX1E = 0x02; /* Bit 1: EP1 RX Packet Ready Event */
 
 	USBCON0 |= 0x04 | 0x02 | 0x78 | 0x01; 
 	USBCON3 = 0x0f;
@@ -294,24 +314,121 @@ void bt_usb_init(void) {
 }
 
 ISR_FUNC
+static void bt_usb_ep0_tx(const void* data, uint16_t len) {
+	if (len > 64) len = 64; 
+	if (len > 0 && data) {
+		memcpy((void*)ep0_buf, data, len);
+		USBCON2 = len | 0x10000; /* Trigger EP0 DMA */
+		while (USBCON2 & 0x10000); /* Wait for DMA to fill the hardware FIFO */
+	}
+	UINDEX = 0;
+	UCSR0 = 0x0A; /* TxPktRdy (0x02) | DataEnd (0x08) */
+}
+
+ISR_FUNC
+static void bt_usb_ep0_stall(void) { 
+	UINDEX = 0;
+	UCSR0 = 0x20; /* SendStall (Bit 5 in CSR0) */
+}
+
+USB_FUNC
+static void bt_usb_ep1_kick(void) {
+	uint16_t count = 0;
+
+	/* Always fill from base, capped at the 32-byte FIFO limit */
+	while ((g_cdc_tx_head != g_cdc_tx_tail) && (count < 32)) {
+		ep1_tx_buf[count++] = g_cdc_tx_buf[g_cdc_tx_tail];
+		g_cdc_tx_tail = (g_cdc_tx_tail + 1) & (BT_CDC_TX_BUF_SIZE - 1);
+	}
+
+	if (count == 0) {
+		g_ep1_tx_busy = false;
+		return;
+	}
+
+	uint32_t pic = PICEN;
+	PICEN = pic & ~0x80;
+
+	uint32_t saved_idx = UINDEX;
+	UINDEX = 1;
+
+	/* DMA always reads from base */
+	USBEP1TXADR = (uint32_t)ep1_tx_buf;
+	USBCON2 = count | 0x20000; 
+
+	/* Wait for DMA to fill the FIFO */
+	while (USBCON2 & 0x20000); 
+
+	/* Tell MUSB the packet is ready */
+	UTXCSR1 = 0x01;
+
+	UINDEX = saved_idx;
+	PICEN = pic;
+
+	/* Tiny bus arbitration barrier matching BootROM delay(3) (~10-15 cycles) */
+	for (volatile int d = 0; d < 6; d++);
+}
+
+ISR_FUNC
 void bt_usb_isr(void) {
 	uint32_t saved_idx = UINDEX;
 
-	uint32_t flags_usb = UINTRUSB; /* 0x218 */
-	uint32_t flags_tx  = UINTRTX1; /* 0x208 */
-	uint32_t flags_rx  = UINTRRX1; /* 0x210 */
+	/* Reading MUSB interrupt registers clears them automatically */
+	uint32_t flags_usb = UINTRUSB;
+	uint32_t flags_tx  = UINTRTX1;
+	uint32_t flags_rx  = UINTRRX1;
 
 	/* USB Bus Reset */
 	if (flags_usb & 0x04) {
 		UFADDR = 0x80;
 		UINDEX = 0;
 		UCSR0 = 0x48;
+		
 		g_pending_address = 0;
 		g_ep0_stage       = EP0_STAGE_SETUP;
 		g_usb_configured  = false;
+
+		g_ep1_tx_busy     = false;
+		g_ep1_rx_ready    = false;
+		g_rx_bank         = 0; /* Always start on Bank 0 after reset */
+		g_cdc_rx_head     = 0;
+		g_cdc_rx_tail     = 0;
+		g_cdc_tx_head     = 0;
+		g_cdc_tx_tail     = 0;
+
 		UINTRUSB       = flags_usb; /* Clear flag */
-		UINDEX         = saved_idx;
+		UINDEX = saved_idx;
 		return;
+	}
+
+	/* EP1 RX Packet Ready */
+	if (flags_rx & 0x02) {
+		UINDEX = 1;
+		if (URXCSR1 & 0x01) {
+			int rx_count = URXCOUNT1;
+			if (rx_count > 32) rx_count = 32;
+
+			/* Select bank based on global tracking */
+			volatile uint8_t *src = (g_rx_bank == 0) ? (ep1_rx_buf + 0x00) 
+													 : (ep1_rx_buf + 0x20);
+			g_rx_bank ^= 1;
+
+			for (int i = 0; i < rx_count; i++) {
+				uint16_t next = (g_cdc_rx_head + 1) & (BT_CDC_RX_BUF_SIZE - 1);
+				if (next != g_cdc_rx_tail) {
+					g_cdc_rx_buf[g_cdc_rx_head] = src[i];
+					g_cdc_rx_head = next;
+				}
+			}
+
+			USBEP1RXADR = (uint32_t)ep1_rx_buf;
+			URXCSR1 = 0x10;
+		}
+	}
+
+	/* EP1 TX Packet Completion (Host ACKed previous packet) */
+	if (flags_tx & 0x02) {
+		bt_usb_ep1_kick();
 	}
 
 	/* EP0 Control Event */
@@ -323,158 +440,186 @@ void bt_usb_isr(void) {
 		}
 
 		UINDEX = 0;
-		uint32_t csr0 = UCSR0;
-
-		if (csr0 & 0x01) { /* RxPktRdy */
+		if (UCSR0 & 0x01) { /* RxPktRdy */
 			int count = UCOUNT0;
-
+			
+			/* 1. Extract data from DMA buffer (already filled by hardware) */
 			if (g_ep0_stage == EP0_STAGE_DATA_OUT) {
 				if (count > 0) {
-					memcpy(&g_line_coding, ep0_buf, count > (int)sizeof(g_line_coding) ? sizeof(g_line_coding) : (size_t)count);
+					memcpy(&g_line_coding, (void*)ep0_buf, count > (int)sizeof(g_line_coding) ? sizeof(g_line_coding) : (size_t)count);
 				}
-				g_ep0_data_ready = true;
 			} else {
 				if (count >= 8) {
-					memcpy(&g_setup_pkt, ep0_buf, 8);
-					g_ep0_setup_ready = true;
+					memcpy(&g_setup_pkt, (void*)ep0_buf, 8);
 				}
 			}
 
-			/* Critical bootrom quirk: ALWAYS pop all bytes from UFIFO0 in both stages */
-			while (count > 0) {
+			/* 2. Pop UFIFO0 to physically clear the hardware FIFO *BEFORE* clearing RxPktRdy */
+			int pop_count = count;
+			while (pop_count > 0) {
 				(void)UFIFO0;
-				count--;
+				pop_count--;
+			}
+
+			/* 3. Advance state machine by writing to UCSR0 */
+			if (g_ep0_stage == EP0_STAGE_DATA_OUT) {
+				UCSR0 = 0x48; /* ServicedRxPktRdy | DataEnd */
+				g_ep0_stage = EP0_STAGE_SETUP;
+			} else {
+				if (count >= 8) {
+					uint8_t req_type = g_setup_pkt.bmRequestType;
+					uint8_t req      = g_setup_pkt.bRequest;
+
+					if ((req_type & 0x60) == 0x00 && req == USB_REQ_SET_ADDRESS) {
+						g_pending_address = (g_setup_pkt.wValue & 0x7F) | 0x80;
+						UCSR0 = 0x48;
+					}
+					else if ((req_type & 0x60) == 0x00 && req == USB_REQ_SET_CONFIGURATION) {
+						g_usb_configured = true;
+						g_rx_bank        = 0; /* Reset Bank toggle to 0 */
+						UCSR0 = 0x48;
+						UINDEX = 1;
+						URXCSR1 = 0x10;
+						UINDEX = 0; /* Restore UINDEX to EP0 */
+					}
+					else if ((req_type & 0x60) == 0x20 && req == 0x20) { /* SET_LINE_CODING */
+						UCSR0 = 0x40; /* ServicedRxPktRdy ONLY */
+						g_ep0_stage = EP0_STAGE_DATA_OUT;
+					}
+					else if ((req_type & 0x60) == 0x20 && req == 0x22) { /* SET_CTRL_LINE_STATE */
+						UCSR0 = 0x48;
+					}
+					else {
+						/* ---- Handle IN-Data Transfers immediately ---- */
+						if ((req_type & 0x60) == 0x00) { /* Standard Requests */
+							switch (req) {
+								case USB_REQ_GET_STATUS: {
+									uint16_t status = 0x0001; /* Device: Self-Powered */
+									bt_usb_ep0_tx(&status, 2);
+									break;
+								}
+								case USB_REQ_GET_DESCRIPTOR: {
+									uint8_t desc_type = (g_setup_pkt.wValue >> 8);
+									uint8_t desc_idx  = (g_setup_pkt.wValue & 0xFF);
+									const uint8_t* ptr = NULL;
+									uint16_t len = 0;
+
+									if (desc_type == USB_DESC_TYPE_DEVICE) {
+										ptr = (const uint8_t*)&dev_desc;
+										len = sizeof(dev_desc);
+									} else if (desc_type == USB_DESC_TYPE_CONFIG) {
+										ptr = (const uint8_t*)&conf_desc;
+										len = sizeof(conf_desc);
+									} else if (desc_type == USB_DESC_TYPE_STRING) {
+										if (desc_idx == 0)      { ptr = (const uint8_t*)&str_lang_desc; len = sizeof(str_lang_desc); }
+										else if (desc_idx == 1) { ptr = (const uint8_t*)&str_mfr_desc;  len = sizeof(str_mfr_desc);  }
+										else if (desc_idx == 2) { ptr = (const uint8_t*)&str_prod_desc; len = sizeof(str_prod_desc); }
+									}
+
+									if (ptr) {
+										if (len > g_setup_pkt.wLength) len = g_setup_pkt.wLength;
+										bt_usb_ep0_tx(ptr, len); 
+									} else {
+										bt_usb_ep0_stall();
+									}
+									break;
+								}
+								default:
+									bt_usb_ep0_stall();
+									break;
+							}
+						} else if ((req_type & 0x60) == 0x20) {
+							if (req == 0x21) { /* GET_LINE_CODING */
+								bt_usb_ep0_tx(&g_line_coding, sizeof(g_line_coding));
+							} else {
+								bt_usb_ep0_stall();
+							}
+						} else {
+							bt_usb_ep0_stall();
+						}
+					}
+				}
 			}
 		}
-		UINTRTX1 = flags_tx;
-	}
-
-	if (flags_rx) {
-		UINTRRX1 = flags_rx;
 	}
 
 	UINDEX = saved_idx;
 }
 
+/* ==============================================================================
+ * CDC ACM APPLICATION API
+ * ============================================================================== */
+
 USB_FUNC
-void bt_usb_tick(void) {
-	/* Auto-drain EP1 OUT: immediately ACKs escape sequences from host on screen exit */
-	if (g_usb_configured) {
-		/* Protect UINDEX from ISR preemption */
-		uint32_t pic = PICEN;
-		PICEN = pic & ~0x80;
-		uint32_t saved_idx = UINDEX;
+static inline bool bt_cdc_is_connected(void) {
+	return g_usb_configured;
+}
 
-		UINDEX = 1;
-		if (URXCSR1 & 0x01) { /* RxPktRdy */
-			int rx_count = URXCOUNT1;
-			while (rx_count > 0) {
-				(void)UFIFO1;
-				rx_count--;
-			}
-			/* Re-arm EP1 RX DMA to accept and ACK subsequent packets */
-			USBEP1RXADR = (uint32_t)ep1_rx_buf;
-			URXCSR1 = 0x10;
-		}
+USB_FUNC
+void bt_cdc_write_char(char c) {
+	if (!g_usb_configured) return;
+	uint32_t timeout = BT_CDC_TX_TIMEOUT;
 
-		UINDEX = saved_idx;
-		PICEN = pic;
+	/* Wait if software ring buffer is full */
+	while (((g_cdc_tx_head + 1) & (BT_CDC_TX_BUF_SIZE - 1)) == g_cdc_tx_tail) {
+		if (--timeout == 0) return;
 	}
 
-	/* Handle second-stage OUT data for SET_LINE_CODING */
-	if (g_ep0_data_ready) {
-		g_ep0_data_ready = false;
-		if (g_ep0_stage == EP0_STAGE_DATA_OUT) {
-			UINDEX = 0;
-			UCSR0 = 0x48; /* ServicedRxPktRdy | DataEnd */
-			g_ep0_stage = EP0_STAGE_SETUP;
+	/* Push character and advance head */
+	g_cdc_tx_buf[g_cdc_tx_head] = (uint8_t)c;
+	g_cdc_tx_head = (g_cdc_tx_head + 1) & (BT_CDC_TX_BUF_SIZE - 1);
+
+	/* Claim hardware and kickstart if sleeping */
+	if (!g_ep1_tx_busy) {
+		g_ep1_tx_busy = true;
+		bt_usb_ep1_kick();
+	}
+}
+
+USB_FUNC
+void bt_cdc_write(const void* data, size_t len) {
+	if (!g_usb_configured || len == 0) return;
+
+	const uint8_t* ptr = (const uint8_t*)data;
+	uint32_t timeout = BT_CDC_TX_TIMEOUT;
+
+	while (len > 0) {
+		uint16_t head = g_cdc_tx_head;
+		uint16_t tail = *(volatile uint16_t*)&g_cdc_tx_tail; 
+		uint16_t free_space = (tail - head - 1) & (BT_CDC_TX_BUF_SIZE - 1);
+
+		if (free_space == 0) {
+			if (--timeout == 0) return;
+			continue;
 		}
-		return;
+
+		uint16_t chunk = (len < free_space) ? len : free_space;
+		for (uint16_t i = 0; i < chunk; i++) {
+			g_cdc_tx_buf[head] = *ptr++;
+			head = (head + 1) & (BT_CDC_TX_BUF_SIZE - 1);
+		}
+		g_cdc_tx_head = head;
+
+		if (!g_ep1_tx_busy) {
+			g_ep1_tx_busy = true;
+			bt_usb_ep1_kick();
+		}
+
+		len -= chunk;
+		timeout = BT_CDC_TX_TIMEOUT;
+	}
+}
+
+USB_FUNC
+int bt_cdc_read_char(void) {
+	/* Lock-free empty check */
+	if (g_cdc_rx_head == g_cdc_rx_tail) {
+		return -1;
 	}
 
-	/* Handle incoming SETUP packets (Single-cycle check when idle) */
-	if (!g_ep0_setup_ready) return;
-	g_ep0_setup_ready = false;
-
-	uint8_t req_type = g_setup_pkt.bmRequestType;
-	uint8_t req      = g_setup_pkt.bRequest;
-
-	if ((req_type & 0x60) == 0x00) { /* Standard Requests */
-		switch (req) {
-			case USB_REQ_GET_STATUS: {
-				uint16_t status = 0x0000;
-				uint8_t recipient = req_type & 0x1F;
-				if (recipient == 0x00) {
-					status = 0x0001; /* Device: Self-Powered */
-				}
-				bt_usb_ep0_tx(&status, 2);
-				break;
-			}
-
-			case USB_REQ_GET_DESCRIPTOR: {
-				uint8_t desc_type = (g_setup_pkt.wValue >> 8);
-				uint8_t desc_idx  = (g_setup_pkt.wValue & 0xFF);
-				const uint8_t* ptr = NULL;
-				uint16_t len = 0;
-
-				if (desc_type == USB_DESC_TYPE_DEVICE) {
-					ptr = (const uint8_t*)&dev_desc;
-					len = sizeof(dev_desc);
-				} else if (desc_type == USB_DESC_TYPE_CONFIG) {
-					ptr = (const uint8_t*)&conf_desc;
-					len = sizeof(conf_desc);
-				} else if (desc_type == USB_DESC_TYPE_STRING) {
-					if (desc_idx == 0)      { ptr = (const uint8_t*)&str_lang_desc; len = sizeof(str_lang_desc); }
-					else if (desc_idx == 1) { ptr = (const uint8_t*)&str_mfr_desc;  len = sizeof(str_mfr_desc);  }
-					else if (desc_idx == 2) { ptr = (const uint8_t*)&str_prod_desc; len = sizeof(str_prod_desc); }
-				}
-
-				if (ptr) {
-					if (len > g_setup_pkt.wLength) len = g_setup_pkt.wLength;
-					bt_usb_ep0_tx(ptr, len); 
-				} else {
-					bt_usb_ep0_stall();
-				}
-				break;
-			}
-
-			case USB_REQ_SET_ADDRESS:
-				g_pending_address = (g_setup_pkt.wValue & 0x7F) | 0x80;
-				UINDEX = 0;
-				UCSR0 = 0x48; /* ServicedRxPktRdy | DataEnd */
-				break;
-
-			case USB_REQ_SET_CONFIGURATION:
-				g_usb_configured = true;
-				UINDEX = 0;
-				UCSR0 = 0x48; /* ServicedRxPktRdy | DataEnd */
-
-				/* Arm EP1 RX so incoming data is ACKed immediately */
-				USBEP1RXADR = (uint32_t)ep1_rx_buf;
-				UINDEX = 1;
-				URXCSR1 = 0x10;
-				break;
-
-			default:
-				bt_usb_ep0_stall();
-				break;
-		}
-	} else if ((req_type & 0x60) == 0x20) { /* CDC Class Requests */
-		if (req == 0x20) { /* SET_LINE_CODING: Expect 7 bytes of OUT data */
-			UINDEX = 0;
-			UCSR0 = 0x40; /* ServicedRxPktRdy ONLY */
-			g_ep0_stage = EP0_STAGE_DATA_OUT;
-		} else if (req == 0x21) { /* GET_LINE_CODING: Send 7 bytes */
-			bt_usb_ep0_tx(&g_line_coding, sizeof(g_line_coding));
-		} else if (req == 0x22) { /* SET_CONTROL_LINE_STATE: No data stage */
-			UINDEX = 0;
-			UCSR0 = 0x48; /* ServicedRxPktRdy | DataEnd */
-		} else {
-			bt_usb_ep0_stall();
-		}
-	} else {
-		bt_usb_ep0_stall();
-	}
+	uint8_t ch = g_cdc_rx_buf[g_cdc_rx_tail];
+	g_cdc_rx_tail = (g_cdc_rx_tail + 1) & (BT_CDC_RX_BUF_SIZE - 1);
+	return (int)ch;
 }
 
 #endif /* BLUETRUM_USB_H */
