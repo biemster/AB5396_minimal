@@ -187,7 +187,7 @@ static const cdc_config_descriptor_t conf_desc = {
 		.bDescriptorType     = 0x05,
 		.bEndpointAddress    = 0x01,
 		.bmAttributes        = 0x02, /* Bulk OUT */
-		.wMaxPacketSize      = 0x0040,
+		.wMaxPacketSize      = 0x0020, /* 32 bytes to match physical bank size */
 		.bInterval           = 0x00
 	},
 	.ep1_in = {
@@ -211,12 +211,13 @@ static const str_prod_t str_prod_desc = { sizeof(str_prod_t), USB_DESC_TYPE_STRI
 /* ==============================================================================
  * DRIVER STATE & HARDWARE BUFFERS (Volatile to prevent CPU caching over DMA)
  * ============================================================================== */
-#define BT_USB_DPRAM_BASE 0x1E000
-/* Map directly to the hardware-dedicated DPRAM just like the BootROM does */
-static volatile uint8_t* const ep1_tx_buf = (volatile uint8_t*)(BT_USB_DPRAM_BASE + 0x000);
-static volatile uint8_t* const ep1_rx_buf = (volatile uint8_t*)(BT_USB_DPRAM_BASE + 0x100);
-static volatile uint8_t* const ep0_buf    = (volatile uint8_t*)(BT_USB_DPRAM_BASE + 0x200);
-static volatile uint8_t* const ep2_tx_buf = (volatile uint8_t*)(BT_USB_DPRAM_BASE + 0x300);
+static uint8_t ep0_buf[64]    __attribute__((aligned(4)));
+static uint8_t ep1_rx_buf[64] __attribute__((aligned(4)));
+static uint8_t ep1_tx_buf[64] __attribute__((aligned(4)));
+static uint8_t ep2_tx_buf[8]  __attribute__((aligned(4)));
+
+/* USB EP1 Double-Buffering Hardware Bank Tracker */
+static volatile uint8_t  g_rx_bank = 0;
 
 /* Software Stream FIFOs */
 static volatile uint8_t  g_cdc_rx_buf[BT_CDC_RX_BUF_SIZE];
@@ -256,12 +257,13 @@ static usb_cdc_line_coding_t g_line_coding = {
 USB_FUNC
 void bt_usb_init(void) {
 	/* Reset Software FIFOs */
-	g_cdc_rx_head = 0;
-	g_cdc_rx_tail = 0;
-	g_cdc_tx_head = 0;
-	g_cdc_tx_tail = 0;
-	g_ep1_tx_busy = false;
+	g_cdc_rx_head  = 0;
+	g_cdc_rx_tail  = 0;
+	g_cdc_tx_head  = 0;
+	g_cdc_tx_tail  = 0;
+	g_ep1_tx_busy  = false;
 	g_ep1_rx_ready = false;
+	g_rx_bank      = 0; /* Reset Bank toggle */
 
 	/* Global Bluetrum reset */
 	USBCON0 = 0x20;
@@ -279,12 +281,12 @@ void bt_usb_init(void) {
 
 	/* Configure EP1/EP2 descriptors in MUSB to quiet the bus */
 	UINDEX = 1;
-	UTXMAXP = 8;    /* 64 bytes (64 >> 3) */
+	UTXMAXP = 4;    /* 32 bytes (32 >> 3), is max on this chip */
 	UTXCSR1 = 0x48; /* ClrDataTog | FlushFIFO */
 	UTXCSR2 = 0x20; /* Mode = TX */
 	UTXTYPE = 0x21; /* Protocol Bulk (0b10 << 4) | Target EP1 (need to figure out what to write there for non-Bulk endpoints) */
 
-	URXMAXP = 8;    /* 64 bytes (64 >> 3) */
+	URXMAXP = 4;    /* 32 bytes (32 >> 3), is max on this chip */
 	URXCSR1 = 0x90; /* ClrDataTog | FlushFIFO */
 	URXCSR2 = 0x00; /* Mode = RX */
 	URXTYPE = 0x21; /* Protocol Bulk (0b10 << 4) | Target EP1 (need to figure out what to write there for non-Bulk endpoints) */
@@ -333,8 +335,8 @@ USB_FUNC
 static void bt_usb_ep1_kick(void) {
 	uint16_t count = 0;
 
-	/* Copy chunk to DPRAM (No locks needed, thread-safe consumer) */
-	while ((g_cdc_tx_head != g_cdc_tx_tail) && (count < 64)) {
+	/* Always fill from base, capped at the 32-byte FIFO limit */
+	while ((g_cdc_tx_head != g_cdc_tx_tail) && (count < 32)) {
 		ep1_tx_buf[count++] = g_cdc_tx_buf[g_cdc_tx_tail];
 		g_cdc_tx_tail = (g_cdc_tx_tail + 1) & (BT_CDC_TX_BUF_SIZE - 1);
 	}
@@ -344,25 +346,27 @@ static void bt_usb_ep1_kick(void) {
 		return;
 	}
 
-	/* Lock interrupts strictly for the hardware DMA trigger to prevent 
-	 * EP0/RX from colliding with the global USBCON2 or UINDEX registers. */
 	uint32_t pic = PICEN;
 	PICEN = pic & ~0x80;
-	
+
 	uint32_t saved_idx = UINDEX;
 	UINDEX = 1;
-	
-	/* Trigger DMA and start transmission */
+
+	/* DMA always reads from base */
 	USBEP1TXADR = (uint32_t)ep1_tx_buf;
 	USBCON2 = count | 0x20000; 
-	
-	/* Wait for DMA to fill the FIFO before telling host it's ready */
+
+	/* Wait for DMA to fill the FIFO */
 	while (USBCON2 & 0x20000); 
-	
-	UTXCSR1 = 0x01; /* Assert TxPktRdy */
-	
+
+	/* Tell MUSB the packet is ready */
+	UTXCSR1 = 0x01;
+
 	UINDEX = saved_idx;
 	PICEN = pic;
+
+	/* Tiny bus arbitration barrier matching BootROM delay(3) (~10-15 cycles) */
+	for (volatile int d = 0; d < 6; d++);
 }
 
 ISR_FUNC
@@ -386,6 +390,7 @@ void bt_usb_isr(void) {
 
 		g_ep1_tx_busy     = false;
 		g_ep1_rx_ready    = false;
+		g_rx_bank         = 0; /* Always start on Bank 0 after reset */
 		g_cdc_rx_head     = 0;
 		g_cdc_rx_tail     = 0;
 		g_cdc_tx_head     = 0;
@@ -401,18 +406,21 @@ void bt_usb_isr(void) {
 		UINDEX = 1;
 		if (URXCSR1 & 0x01) {
 			int rx_count = URXCOUNT1;
-			if (rx_count > 64) rx_count = 64;
+			if (rx_count > 32) rx_count = 32;
 
-			/* Read from DPRAM byte-by-byte */
+			/* Select bank based on global tracking */
+			volatile uint8_t *src = (g_rx_bank == 0) ? (ep1_rx_buf + 0x00) 
+													 : (ep1_rx_buf + 0x20);
+			g_rx_bank ^= 1;
+
 			for (int i = 0; i < rx_count; i++) {
 				uint16_t next = (g_cdc_rx_head + 1) & (BT_CDC_RX_BUF_SIZE - 1);
 				if (next != g_cdc_rx_tail) {
-					g_cdc_rx_buf[g_cdc_rx_head] = ep1_rx_buf[i];
+					g_cdc_rx_buf[g_cdc_rx_head] = src[i];
 					g_cdc_rx_head = next;
 				}
 			}
 
-			/* Re-arm EP1 RX DMA to accept the next packet */
 			USBEP1RXADR = (uint32_t)ep1_rx_buf;
 			URXCSR1 = 0x10;
 		}
@@ -468,6 +476,7 @@ void bt_usb_isr(void) {
 					}
 					else if ((req_type & 0x60) == 0x00 && req == USB_REQ_SET_CONFIGURATION) {
 						g_usb_configured = true;
+						g_rx_bank        = 0; /* Reset Bank toggle to 0 */
 						UCSR0 = 0x48;
 						UINDEX = 1;
 						URXCSR1 = 0x10;
@@ -532,11 +541,6 @@ void bt_usb_isr(void) {
 				}
 			}
 		}
-		UINTRTX1 = flags_tx;
-	}
-
-	if (flags_rx) {
-		UINTRRX1 = flags_rx;
 	}
 
 	UINDEX = saved_idx;

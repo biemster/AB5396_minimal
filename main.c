@@ -172,7 +172,7 @@ static struct ush_node_object g_root;
 int main(void) {
 	/* platform init */
 	ROM_CLOCK_INIT();
-//	ROM_UART0_INIT();
+	ROM_UART0_INIT();
 
 	isr_vector_table[15] = (void *)usb_isr_wrapper;
 	PICADR = (uint32_t)isr_vector_table;
@@ -198,35 +198,8 @@ int main(void) {
 	while (1) {
 		ush_service(&g_ush);
 
-		/* If host enumerated us, process I/O */
-//		if (bt_cdc_is_connected()) {
-//			bt_cdc_write(g_hostname, 14);
-//			bt_cdc_write_char('[');
-//			bt_cdc_write_char(']');
-//
-//			bt_cdc_write_char('\n');
-//			bt_cdc_write_char('\r');
-//			int c = '4';//bt_cdc_read_char();
-//			
-//			if (c >= 0) {
-//				/* Loopback formatting: 'a' -> '[a]\r\n' */
-//				bt_cdc_write_char('[');
-//				bt_cdc_write_char('[');
-//				bt_cdc_write_char('[');
-//				bt_cdc_write_char((char)c);
-//				bt_cdc_write_char(']');
-//				bt_cdc_write_char(']');
-//				bt_cdc_write_char(']');
-//				if(c == 't') {
-//					bt_cdc_write(g_hostname, 6);
-//				}
-//				bt_cdc_write_char('\r');
-//				bt_cdc_write_char('\n');
-//			}
-//		}
-
 		/* other periodic tasks can run here */
-		ROM_DELAY(100); // unfortunately necessary otherwise output is garbled
+		ROM_DELAY(100); // don't starve DMA masters (for USB for example)
 		WDTCON = 10; // feed doggy
 	}
 
