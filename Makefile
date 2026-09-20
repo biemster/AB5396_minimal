@@ -10,7 +10,7 @@ MICROSHELL_DIR ?= ../microshell
 MAIN_FLASH_OFFSET ?= 0x00001000
 
 ARCH    := -march=rv32imac_zicsr -mabi=ilp32
-CFLAGS  := $(ARCH) -mstrict-align -Wall -ffreestanding -nostartfiles -ffunction-sections -fdata-sections -I. -I$(MICROSHELL_DIR)/src -DUSH_CONFIG_CUSTOM_FILE=\"ush_config.h\"
+CFLAGS  := $(ARCH) -mstrict-align -Wall -ffreestanding -nostartfiles -ffunction-sections -fdata-sections -Iinclude -I$(MICROSHELL_DIR)/src -DUSH_CONFIG_CUSTOM_FILE=\"ush_config.h\"
 LDFLAGS := -mstrict-align --specs=nano.specs --specs=nosys.specs -Wl,--gc-sections -Wl,--undefined=g_ush_buildin_commands -Wl,--no-warn-rwx-segments -lc -lgcc
 
 # Microshell source files (the repo stores sources in src/src and commands in src/src/commands)
@@ -47,15 +47,15 @@ MICRO_SRCS := $(MICROSHELL_DIR)/src/src/ush.c \
 MICRO_OBJS := $(MICRO_SRCS:.c=.o)
 
 # --- STAGE 1 (BOOTLOADER) ---
-boot.elf: startup_boot.S boot.c boot.ld
+boot.elf:  linker/boot.ld startup/startup_boot.S src/boot.c
 	@echo -e "\n*** COMPILING STAGE 1 BOOTLOADER ***"
-	$(CC) $(CFLAGS) -DMAIN_FLASH_OFFSET=$(MAIN_FLASH_OFFSET) -T boot.ld startup_boot.S boot.c -o $@
+	$(CC) $(CFLAGS) -DMAIN_FLASH_OFFSET=$(MAIN_FLASH_OFFSET) -T $^ -o $@
 
 boot.bin: boot.elf
 	$(OBJCOPY) -O binary $< $@
 
 # Wrapper and Warning Rule
-LUCK.bin: boot.bin boot.c
+LUCK.bin: boot.bin src/boot.c
 	@echo -e "\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
 	@echo "WARNING: new stage1 bootloader LUCK.bin has been generated!"
 	@echo "Ensure that it starts with a way to exit stage1(), for example"
@@ -70,9 +70,9 @@ $(MICRO_OBJS): %.o: %.c
 	@echo "CC $<"
 	$(CC) $(CFLAGS) -c $< -o $@
 
-main.elf: startup_main.S main.c main.ld $(MICRO_OBJS)
+main.elf: linker/main.ld startup/startup_main.S src/main.c $(MICRO_OBJS)
 	@echo -e "\n*** COMPILING MAIN APPLICATION ***"
-	$(CC) $(CFLAGS) -T main.ld startup_main.S main.c $(MICRO_OBJS) $(LDFLAGS) -o $@
+	$(CC) $(CFLAGS) -T $^ $(LDFLAGS) -o $@
 
 main.bin: main.elf
 	$(OBJCOPY) -O binary $< $@

@@ -5,7 +5,7 @@ Minimal SDK for Bluetrum AB5396
 This repo will be a minimal SDK for the Bluetrum BLE MCU AB5396 found in cheap USB BLE dongles[^1][^2].\
 There are currently two ways to run code on the chip, in the `inram/` folder the bootloader is sent
 a stub to be ran from `0x12000`, and for the second method the XIP cache is reverse engineered and
-described in [XIP.md](XIP.md). For this method `boot.c` implements the stage1 bootloader that is
+described in [XIP.md](docs/XIP.md). For this method `boot.c` implements the stage1 bootloader that is
 packed with `mkheader.py` from [^4] which sets up the XIP cache system and jumps to plain
 unobfuscated code in flash, which can be put there using the `download.py` script from that same project.
 Subsequently `main.c` contains the code that is run from XIP, at the address specified in `XIP_FLASH_OFFSET`.
