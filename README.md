@@ -31,12 +31,7 @@ Take into account this `Makefile` uses `minichlink` from [^5] and a WCH linkE pr
 
 To compile the custom stage1 bootloader and main program that will live in flash, just use `make` or `make clean all`
 in the root folder of the project. Currently the firmware uses microshell [^7], so clone that repo too and point
-the variable in the `Makefile` to this. Also if you keep using the single wire UART to interact with `microshell`,
-you can turn off the terminal echo like this:
-```bash
-sed -i "s/echo != false/echo != false \&\& ch < ' '/" ../microshell/src/src/ush_read_char.c
-```
-This is not necessary if you interact with `microshell` over the USB ACM interface.
+the variable in the `Makefile` to this.
 
 After running `make` the resulting stage1 loader header `LUCK.bin` can be written to flash with `bluetrum-tools/download.py`:
 ```bash

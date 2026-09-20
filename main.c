@@ -32,20 +32,20 @@ typedef void (*rom_delay)(uint32_t cycles);
 #define REG32(addr)  (*(volatile uint32_t *)(uintptr_t)(addr))
 #endif
 
-static void print_hex8(uint8_t v) {
+static void uart0_print_hex8(uint8_t v) {
 	static const char hex[] = "0123456789abcdef"; // keep this to test the XIP pager
 	ROM_UART0_PUTCHAR(hex[v >> 4]);
 	ROM_UART0_PUTCHAR(hex[v & 0xf]);
 }
 
-static void print_hex32(uint32_t v) {
-	print_hex8(v >> 24);
-	print_hex8(v >> 16);
-	print_hex8(v >> 8);
-	print_hex8(v & 0xff);
+static void uart0_print_hex32(uint32_t v) {
+	uart0_print_hex8(v >> 24);
+	uart0_print_hex8(v >> 16);
+	uart0_print_hex8(v >> 8);
+	uart0_print_hex8(v & 0xff);
 }
 
-static void print_string(const char *str) {
+static void uart0_print_string(const char *str) {
 	while (*str) {
 		ROM_UART0_PUTCHAR(*str++);
 	}
@@ -103,7 +103,7 @@ void ush_assert_failed(const char *file, int line) {
 	ROM_UART0_PUTCHAR(':');
 
 	/* print line number as hex */
-	print_hex32((uint32_t)line);
+	uart0_print_hex32((uint32_t)line);
 	ROM_UART0_PUTCHAR('\n');
 	ROM_UART0_PUTCHAR('\r');
 
@@ -113,31 +113,41 @@ void ush_assert_failed(const char *file, int line) {
 	}
 }
 
-/* uart0_poll as above */
+static int uart0_singlewire_inchar = -1;
 static int uart0_poll(void) {
 	if ((UART0CON & 0x200) == 0) return -1;
 	uint32_t data = UART0DATA;
 	UART0CPND = 0x200;
-	return (data & 0xff);
+	uart0_singlewire_inchar = (data & 0xff);
+	return uart0_singlewire_inchar;
 }
 
-static int ush_read_cb(struct ush_object *self, char *ch)
-{
+static int ush_read_cb(struct ush_object *self, char *ch) {
 	(void)self;
-	int v = bt_cdc_is_connected() ? bt_cdc_read_char() : uart0_poll();
+	int v = -1;
+	if(bt_cdc_is_connected()) {
+		v = bt_cdc_read_char();
+	}
+	else {
+		v = uart0_poll();
+		uart0_singlewire_inchar = v;
+	}
 	if (v < 0) return 0;    /* no data */
+
 	*ch = (char)(v & 0xff);
 	return 1;               /* a char was read */
 }
 
-static int ush_write_cb(struct ush_object *self, char c)
-{
+static int ush_write_cb(struct ush_object *self, char c) {
 	(void)self;
 	if (bt_cdc_is_connected()) {
 		bt_cdc_write_char(c); /* Blocking with safety timeout */
 	}
 	else {
-		ROM_UART0_PUTCHAR(c);
+		if(c != (char)(uart0_singlewire_inchar & 0xff)) {
+			ROM_UART0_PUTCHAR(c);
+		}
+		uart0_singlewire_inchar = -1;
 	}
 	return 1;
 }
