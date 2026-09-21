@@ -1,0 +1,248 @@
+diff --git a/src/inc/ush_types.h b/src/inc/ush_types.h
+index c14424b..963c542 100644
+--- a/src/inc/ush_types.h
++++ b/src/inc/ush_types.h
+@@ -289,6 +289,11 @@ struct ush_object {
+         uint8_t *process_data;                          /**< Shared processed data pointer */
+         size_t process_data_size;                       /**< Shared processed data size */
+         int process_stage;                              /**< Shared processed stage number */
++        bool process_raw;                               /**< Process data is read from a raw address */
++        bool process_raw32;                             /**< Raw data is read as uint32_t values */
++        uintptr_t process_raw_address;                  /**< Raw data address */
++        size_t process_raw_word_index;                  /**< Cached raw32 word index */
++        uint32_t process_raw_word;                      /**< Cached raw32 word */
+ 
+ #if USH_CONFIG_ENABLE_FEATURE_AUTOCOMPLETE == 1
+         ush_state_t autocomp_prev_state;                /**< Previous autocompletation FSM state */
+diff --git a/src/src/commands/ush_cmd.c b/src/src/commands/ush_cmd.c
+index dc8ae38..a745291 100644
+--- a/src/src/commands/ush_cmd.c
++++ b/src/src/commands/ush_cmd.c
+@@ -107,7 +107,9 @@ const struct ush_file_descriptor g_ush_buildin_commands[] = {
+         {
+                 .name = "xxd",
+                 .description = "dump file hex content",
+-                .help = "usage: xxd <file>\r\n",
++                .help = "usage: xxd <file>\r\n"
++                        "       xxd --raw8 <address> [size]\r\n"
++                        "       xxd --raw32 <address> [size]\r\n",
+                 .exec = ush_buildin_cmd_xxd_callback,
+                 .process = ush_buildin_cmd_xxd_service,
+         },
+diff --git a/src/src/commands/ush_cmd_xxd.c b/src/src/commands/ush_cmd_xxd.c
+index 27d6ef5..e0cf496 100644
+--- a/src/src/commands/ush_cmd_xxd.c
++++ b/src/src/commands/ush_cmd_xxd.c
+@@ -25,6 +25,7 @@ SOFTWARE.
+ #include "inc/ush.h"
+ #include "inc/ush_internal.h"
+ 
++#include <stdint.h>
+ #include <string.h>
+ 
+ #if USH_CONFIG_ENABLE_FEATURE_COMMANDS == 1
+@@ -33,10 +34,177 @@ SOFTWARE.
+ 
+ #define USH_CMD_XXD_COLUMNS     USH_CONFIG_CMD_XXD_COLUMNS
+ 
++static bool ush_cmd_xxd_parse_uintmax(const char *text, uintmax_t *value)
++{
++        uintmax_t result = 0;
++        uintmax_t limit = UINTMAX_MAX;
++        unsigned int base = 10;
++        size_t index = 0;
++
++        if ((text == NULL) || (text[0] == '\0')) {
++                return false;
++        }
++
++        if ((text[0] == '0') && ((text[1] == 'x') || (text[1] == 'X'))) {
++                base = 16;
++                index = 2;
++        }
++
++        if (text[index] == '\0') {
++                return false;
++        }
++
++        for (; text[index] != '\0'; index++) {
++                unsigned int digit;
++                char ch = text[index];
++
++                if ((ch >= '0') && (ch <= '9')) {
++                        digit = (unsigned int)(ch - '0');
++                } else if ((base == 16) && (ch >= 'a') && (ch <= 'f')) {
++                        digit = (unsigned int)(ch - 'a') + 10U;
++                } else if ((base == 16) && (ch >= 'A') && (ch <= 'F')) {
++                        digit = (unsigned int)(ch - 'A') + 10U;
++                } else {
++                        return false;
++                }
++
++                if (digit >= base) {
++                        return false;
++                }
++
++                if (result > ((limit - digit) / base)) {
++                        return false;
++                }
++
++                result = (result * base) + digit;
++        }
++
++        *value = result;
++        return true;
++}
++
++static bool ush_cmd_xxd_parse_address(const char *text, uintptr_t *address)
++{
++        uintmax_t value;
++
++        if ((ush_cmd_xxd_parse_uintmax(text, &value) == false) ||
++            (value > UINTPTR_MAX)) {
++                return false;
++        }
++
++        *address = (uintptr_t)value;
++        return true;
++}
++
++static bool ush_cmd_xxd_parse_size(const char *text, size_t *size)
++{
++        uintmax_t value;
++
++        if ((ush_cmd_xxd_parse_uintmax(text, &value) == false) ||
++            (value > SIZE_MAX)) {
++                return false;
++        }
++
++        *size = (size_t)value;
++        return true;
++}
++
++static uint8_t ush_cmd_xxd_get_byte(struct ush_object *self, size_t offset)
++{
++        if (self->process_raw == false) {
++                return self->process_data[offset];
++        }
++
++        if (self->process_raw32 == false) {
++                volatile uint8_t const *address =
++                        (volatile uint8_t const *)(self->process_raw_address + offset);
++                return *address;
++        }
++
++        size_t word_index = offset / sizeof(uint32_t);
++
++        /*
++         * Keep the value in the shell object because xxd output is
++         * generated over multiple asynchronous service calls.
++         */
++        if (self->process_raw_word_index != word_index) {
++                volatile uint32_t const *address =
++                        (volatile uint32_t const *)(
++                                self->process_raw_address +
++                                (word_index * sizeof(uint32_t)));
++
++                self->process_raw_word = *address;
++                self->process_raw_word_index = word_index;
++        }
++
++        return ((uint8_t const *)&self->process_raw_word)
++                [offset % sizeof(uint32_t)];
++}
++
++
+ void ush_buildin_cmd_xxd_callback(struct ush_object *self, struct ush_file_descriptor const *file, int argc, char *argv[])
+ {
+         (void)file;
+ 
++        self->process_raw = false;
++        self->process_raw32 = false;
++
++        if ((argc == 3) || (argc == 4)) {
++                bool raw32 = strcmp(argv[1], "--raw32") == 0;
++                bool raw8 = strcmp(argv[1], "--raw8") == 0;
++                uintptr_t address;
++                size_t count = 1;
++                uintmax_t end_address;
++
++                if ((raw32 == false) && (raw8 == false)) {
++                        ush_print_status(self, USH_STATUS_ERROR_COMMAND_WRONG_ARGUMENTS);
++                        return;
++                }
++
++                if (ush_cmd_xxd_parse_address(argv[2], &address) == false) {
++                        ush_print_status(self, USH_STATUS_ERROR_COMMAND_WRONG_ARGUMENTS);
++                        return;
++                }
++
++                if ((argc == 4) &&
++                    (ush_cmd_xxd_parse_size(argv[3], &count) == false)) {
++                        ush_print_status(self, USH_STATUS_ERROR_COMMAND_WRONG_ARGUMENTS);
++                        return;
++                }
++
++                if (raw32) {
++                        if (count > (SIZE_MAX / sizeof(uint32_t))) {
++                                ush_print_status(self, USH_STATUS_ERROR_COMMAND_WRONG_ARGUMENTS);
++                                return;
++                        }
++
++                        end_address = (uintmax_t)address +
++                                      ((uintmax_t)count * sizeof(uint32_t));
++                        if (end_address > ((uintmax_t)UINTPTR_MAX + 1U)) {
++                                ush_print_status(self, USH_STATUS_ERROR_COMMAND_WRONG_ARGUMENTS);
++                                return;
++                        }
++
++                        self->process_data_size = count * sizeof(uint32_t);
++                } else {
++                        end_address = (uintmax_t)address + (uintmax_t)count;
++                        if (end_address > ((uintmax_t)UINTPTR_MAX + 1U)) {
++                                ush_print_status(self, USH_STATUS_ERROR_COMMAND_WRONG_ARGUMENTS);
++                                return;
++                        }
++
++                        self->process_data_size = count;
++                }
++
++                self->process_raw = true;
++                self->process_raw32 = raw32;
++                self->process_raw_address = address;
++                self->process_raw_word_index = (size_t)-1;
++                self->process_data = (uint8_t *)address;
++                ush_process_start(self, file);
++                return;
++        }
++
+         if (argc != 2) {
+                 ush_print_status(self, USH_STATUS_ERROR_COMMAND_WRONG_ARGUMENTS);
+                 return;
+@@ -54,6 +222,8 @@ void ush_buildin_cmd_xxd_callback(struct ush_object *self, struct ush_file_descr
+         }
+ 
+         self->process_data_size = f->get_data(self, f, &self->process_data);
++        self->process_raw = false;
++        self->process_raw32 = false;
+         ush_process_start(self, file);
+ }
+ 
+@@ -86,7 +256,7 @@ bool ush_buildin_cmd_xxd_service(struct ush_object *self, struct ush_file_descri
+                         for (size_t i = 0; i < USH_CMD_XXD_COLUMNS; i++) {
+                                 size_t offset = self->process_index_item + i;
+                                 if (offset < self->process_data_size) {
+-                                        uint8_t b = self->process_data[offset];
++                                        uint8_t b = ush_cmd_xxd_get_byte(self, offset);
+                                         sprintf(&self->desc->output_buffer[strlen(self->desc->output_buffer)], "%02X ", b);
+                                 } else {
+                                         strcat(self->desc->output_buffer, "   ");
+@@ -102,7 +272,7 @@ bool ush_buildin_cmd_xxd_service(struct ush_object *self, struct ush_file_descri
+                         for (size_t i = 0; i < USH_CMD_XXD_COLUMNS; i++) {
+                                 size_t offset = self->process_index_item;
+                                 if (offset < self->process_data_size) {
+-                                        uint8_t b = self->process_data[offset];
++                                        uint8_t b = ush_cmd_xxd_get_byte(self, offset);
+                                         if (ush_utils_is_printable(b) != false) {
+                                                 sprintf(&self->desc->output_buffer[strlen(self->desc->output_buffer)], "%c", (char)b);
+                                         } else {

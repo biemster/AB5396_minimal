@@ -5,6 +5,7 @@
 #include <stddef.h>
 
 /* Enable a minimal set of commands to reduce footprint */
+#define USH_CONFIG_ENABLE_COMMAND_HELP   1
 #define USH_CONFIG_ENABLE_COMMAND_CAT    1
 #define USH_CONFIG_ENABLE_COMMAND_CD     0
 #define USH_CONFIG_ENABLE_COMMAND_LS     1

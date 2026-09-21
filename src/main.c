@@ -176,8 +176,22 @@ static const struct ush_descriptor ush_desc = {
 	.hostname = g_hostname,
 };
 
+extern void radio_ctrl_callback(struct ush_object *self, struct ush_file_descriptor const *file, int argc, char *argv[]);
+extern void dump_rf_registers_service(struct ush_object *self, struct ush_file_descriptor const *file);
+static const struct ush_file_descriptor g_radio_cmd_files[] = {
+	{
+		.name = "radio_ctrl",
+		.description = "dump Bluetrum RF registers",
+		.help = "usage: radio_ctrl\r\n"
+		        "       radio_ctrl --dumpregs\r\n",
+		.exec = radio_ctrl_callback,
+		.process = dump_rf_registers_service,
+	},
+};
+
 static struct ush_object g_ush;
 static struct ush_node_object g_root;
+static struct ush_node_object g_radio_cmd_node;
 
 int main(void) {
 	/* platform init */
@@ -199,6 +213,7 @@ int main(void) {
 	/* initialize shell object and descriptor */
 	memset(&g_ush, 0, sizeof(g_ush));
 	ush_init(&g_ush, &ush_desc);
+	ush_commands_add( &g_ush, &g_radio_cmd_node, g_radio_cmd_files, (sizeof(g_radio_cmd_files) / sizeof(g_radio_cmd_files[0])) );
 
 	/* mount root node (empty root for now) */
 	ush_node_mount(&g_ush, "/", &g_root, NULL, 0);

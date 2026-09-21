@@ -46,9 +46,8 @@ python ../bluetrum-tools/download.py --port /dev/ttyACM0 --baud 115200 write 0x1
 ## progress
 - [x] Run from RAM using bootrom callback
 - [x] Reverse encryption scheme for firmware in flash
-- [x] Run from flash
 - [x] Run from XIP flash
-- [x] microshell
+- [x] microshell (for REPL)
 - [x] USB stack
 - [ ] RF stack
 

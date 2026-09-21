@@ -42,7 +42,8 @@ MICRO_SRCS := $(MICROSHELL_DIR)/src/src/ush.c \
 			$(MICROSHELL_DIR)/src/src/commands/ush_cmd_pwd.c \
 			$(MICROSHELL_DIR)/src/src/commands/ush_cmd_cat.c \
 			$(MICROSHELL_DIR)/src/src/commands/ush_cmd_xxd.c \
-			$(MICROSHELL_DIR)/src/src/commands/ush_cmd_echo.c
+			$(MICROSHELL_DIR)/src/src/commands/ush_cmd_echo.c \
+			microshell/ush_cmd_radio.c
 
 MICRO_OBJS := $(MICRO_SRCS:.c=.o)
 
