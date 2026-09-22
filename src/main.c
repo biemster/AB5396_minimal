@@ -55,13 +55,23 @@ static void uart0_print_string(const char *str) {
  * The "interrupt" attribute is critical for RISC-V so the compiler 
  * generates an `mret` and saves all registers
  */
-__attribute__((section(".isr")))
-__attribute__((interrupt))
-void default_isr(void) {
-	while (1) {
-		// Trap unhandled interrupts here
-	}
-}
+static uint32_t isr_vector_counter[16] = {0};
+__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr0(void) { isr_vector_counter[0]++; }
+__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr1(void) { isr_vector_counter[1]++; }
+__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr2(void) { isr_vector_counter[2]++; }
+__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr3(void) { isr_vector_counter[3]++; }
+__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr4(void) { isr_vector_counter[4]++; }
+__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr5(void) { isr_vector_counter[5]++; }
+__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr6(void) { isr_vector_counter[6]++; }
+__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr7(void) { isr_vector_counter[7]++; }
+__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr8(void) { isr_vector_counter[8]++; }
+__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr9(void) { isr_vector_counter[9]++; }
+__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr10(void) { isr_vector_counter[10]++; }
+__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr11(void) { isr_vector_counter[11]++; }
+__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr12(void) { isr_vector_counter[12]++; }
+__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr13(void) { isr_vector_counter[13]++; }
+__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr14(void) { isr_vector_counter[14]++; }
+__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr15(void) { isr_vector_counter[15]++; }
 
 __attribute__((section(".isr")))
 __attribute__((interrupt))
@@ -73,22 +83,26 @@ void usb_isr_wrapper(void) {
 __attribute__((aligned(256)))
 void *isr_vector_table[16] = {
 	(void*)0x00000000, /* 0x00: Ignored by PIC during IRQs */
-	(void*)0x00080E84, /* 0x04: ISR0 */
-	(void*)0x00080E8C, /* 0x08: ISR1 */
-	(void*)0x00080E9A, /* 0x0C: ISR2 */
-	(void*)0x00000000, /* 0x10: ISR3 */
-	(void*)0x00000000, /* 0x14: ISR4 */
-	(void*)0x00000000, /* 0x18: ISR5 */
-	(void*)0x00000000, /* 0x1C: ISR6 */
-	(void*)0x00084020, /* 0x20: ISR7 XIP Cache NMI handler */
-	(void*)0x00000000, /* 0x24: ISR8 */
-	(void*)0x00000000, /* 0x28: ISR9 */
-	(void*)0x00080EA2, /* 0x2C: ISR10 */
-	(void*)0x00000000, /* 0x30: ISR11 */
-	(void*)0x00000000, /* 0x34: ISR12 */
-	(void*)0x00000000, /* 0x38: ISR13 */
-	(void*)0x00000000  /* 0x3C: ISR14 USB */
+	(void*)0x00000000, /* 0x04: ISR1 */
+	(void*)0x00000000, /* 0x08: ISR2 */
+	(void*)0x00000000, /* 0x0C: ISR3 */
+	(void*)0x00000000, /* 0x10: ISR4 */
+	(void*)0x00000000, /* 0x14: ISR5 */
+	(void*)0x00000000, /* 0x18: ISR6 */
+	(void*)0x00000000, /* 0x1C: ISR7 */
+	(void*)0x00084020, /* 0x20: ISR8 XIP Cache NMI handler */
+	(void*)0x00000000, /* 0x24: ISR9 */
+	(void*)0x00000000, /* 0x28: ISR10 */
+	(void*)0x00000000, /* 0x2C: ISR11 */
+	(void*)0x00000000, /* 0x30: ISR12 */
+	(void*)0x00000000, /* 0x34: ISR13 */
+	(void*)0x00000000, /* 0x38: ISR14 */
+	(void*)0x00000000  /* 0x3C: ISR15 USB */
 };
+
+uint32_t isr_vector_counter_get(size_t index) {
+	return (index < 16) ? isr_vector_counter[index] : 0;
+}
 
 /* called from USH_ASSERT on failure */
 void ush_assert_failed(const char *file, int line) {
@@ -176,6 +190,20 @@ static const struct ush_descriptor ush_desc = {
 	.hostname = g_hostname,
 };
 
+// "isr_counts" command
+extern void isr_counts_callback(struct ush_object *self, struct ush_file_descriptor const *file, int argc, char *argv[]);
+extern void isr_counts_service(struct ush_object *self, struct ush_file_descriptor const *file);
+static const struct ush_file_descriptor g_isr_counts_cmd_files[] = {
+	{
+		.name = "isr_counts",
+		.description = "dump ISR vector counters",
+		.help = "usage: isr_counts\r\n",
+		.exec = isr_counts_callback,
+		.process = isr_counts_service,
+	},
+};
+
+// "radio_ctrl" command
 extern void radio_ctrl_callback(struct ush_object *self, struct ush_file_descriptor const *file, int argc, char *argv[]);
 extern void dump_rf_registers_service(struct ush_object *self, struct ush_file_descriptor const *file);
 static const struct ush_file_descriptor g_radio_cmd_files[] = {
@@ -183,7 +211,10 @@ static const struct ush_file_descriptor g_radio_cmd_files[] = {
 		.name = "radio_ctrl",
 		.description = "dump Bluetrum RF registers",
 		.help = "usage: radio_ctrl\r\n"
-		        "       radio_ctrl --dumpregs\r\n",
+				"       radio_ctrl --init\r\n"
+				"       radio_ctrl --adv\r\n"
+				"       radio_ctrl --clk\r\n"
+				"       radio_ctrl --dumpregs\r\n",
 		.exec = radio_ctrl_callback,
 		.process = dump_rf_registers_service,
 	},
@@ -192,12 +223,28 @@ static const struct ush_file_descriptor g_radio_cmd_files[] = {
 static struct ush_object g_ush;
 static struct ush_node_object g_root;
 static struct ush_node_object g_radio_cmd_node;
+static struct ush_node_object g_isr_counts_cmd_node;
 
 int main(void) {
 	/* platform init */
 	ROM_CLOCK_INIT();
 	ROM_UART0_INIT();
 
+	isr_vector_table[0] = (void *)default_isr0;
+	isr_vector_table[1] = (void *)default_isr1;
+	isr_vector_table[2] = (void *)default_isr2;
+	isr_vector_table[3] = (void *)default_isr3;
+	isr_vector_table[4] = (void *)default_isr4;
+	isr_vector_table[5] = (void *)default_isr5;
+	isr_vector_table[6] = (void *)default_isr6;
+	isr_vector_table[7] = (void *)default_isr7;
+	// isr_vector_table[8] = (void *)default_isr8; // XIP ISR, don't change!
+	isr_vector_table[9] = (void *)default_isr9;
+	isr_vector_table[10] = (void *)default_isr10;
+	isr_vector_table[11] = (void *)default_isr11;
+	isr_vector_table[12] = (void *)default_isr12;
+	isr_vector_table[13] = (void *)default_isr13;
+	isr_vector_table[14] = (void *)default_isr14;
 	isr_vector_table[15] = (void *)usb_isr_wrapper;
 	PICADR = (uint32_t)isr_vector_table;
 
@@ -214,6 +261,7 @@ int main(void) {
 	memset(&g_ush, 0, sizeof(g_ush));
 	ush_init(&g_ush, &ush_desc);
 	ush_commands_add( &g_ush, &g_radio_cmd_node, g_radio_cmd_files, (sizeof(g_radio_cmd_files) / sizeof(g_radio_cmd_files[0])) );
+	ush_commands_add( &g_ush, &g_isr_counts_cmd_node, g_isr_counts_cmd_files, (sizeof(g_isr_counts_cmd_files) / sizeof(g_isr_counts_cmd_files[0])) );
 
 	/* mount root node (empty root for now) */
 	ush_node_mount(&g_ush, "/", &g_root, NULL, 0);

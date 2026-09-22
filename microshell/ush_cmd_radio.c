@@ -22,51 +22,12 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-#include "inc/ush.h"
-#include "inc/ush_internal.h"
-
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-
-/* Mapped SFRs for the internal RF SPI bus. */
-#define RF_SPI_CTRL (*(volatile uint32_t *)0x8070U)
-#define RF_SPI_DAT  (*(volatile uint32_t *)0x81B4U)
-#define RF_SPI_CMD  (*(volatile uint32_t *)0x81B8U)
-
-/* Trigger the SPI transfer and wait for completion. */
-static int rf_spi_tf(void) {
-	uint32_t timeout = 1000000U;
-
-	RF_SPI_CTRL |= 0x01U;
-
-	while ((RF_SPI_CTRL & 0x02U) == 0U) {
-		if (timeout-- == 0U) {
-			return 0;
-		}
-	}
-
-	return 1;
-}
-
-/* Read an RF macrocell register. */
-static int rf_reg_rd(uint8_t reg_addr, uint32_t *value) {
-	RF_SPI_CMD = (uint32_t)reg_addr | 0x100U;
-
-	if (rf_spi_tf() == 0) {
-		return 0;
-	}
-
-	*value = RF_SPI_DAT;
-	return 1;
-}
-
-/* Write an RF macrocell register. */
-static void rf_reg_wr(uint8_t reg_addr, uint32_t value) {
-	RF_SPI_DAT = value;
-	RF_SPI_CMD = (uint32_t)reg_addr | 0x300U;
-	rf_spi_tf();
-}
+#include "inc/ush.h"
+#include "inc/ush_internal.h"
+#include "iSLER.h"
 
 /*
  * Start the register dump.
@@ -82,12 +43,40 @@ static void dump_rf_registers_start(struct ush_object *self, struct ush_file_des
  * processing state machine instead.
  */
 void radio_ctrl_callback(struct ush_object *self, struct ush_file_descriptor const *file, int argc, char *argv[]) {
-	if (argc != 2 || strcmp(argv[1], "--dumpregs") != 0) {
- 		ush_print_status(self, USH_STATUS_ERROR_COMMAND_WRONG_ARGUMENTS);
- 		return;
- 	}
+	(void)file;
 
-	dump_rf_registers_start(self, file);
+	if (argc != 2) {
+		ush_print_status(self, USH_STATUS_ERROR_COMMAND_WRONG_ARGUMENTS);
+		return;
+	}
+
+	if (strcmp(argv[1], "--dumpregs") == 0) {
+		dump_rf_registers_start(self, file);
+	}
+	else if (strcmp(argv[1], "--init") == 0) {
+		rf_init();
+		ble_baseband_init();
+		ush_print(self, "RF+BLE init complete.");
+	}
+	else if (strcmp(argv[1], "--clk") == 0) {
+		uint32_t clk1 = BB_NATIVE_CLK & 0x00FFFFFF;
+		for(volatile int d = 0; d < 10000; d++);
+		uint32_t clk2 = BB_NATIVE_CLK & 0x00FFFFFF;
+		uint32_t diff = (clk2 - clk1) & 0x0FFFFFFF;
+		ush_printf(self, "BaseBand clock advance in 10k CPU ticks: %lu\r\n", diff);
+	}
+	else if (strcmp(argv[1], "--adv") == 0) {
+		const uint8_t payload[] = {
+			0x11, 0x22, 0x33, 0x44, 0x55, 0x66, // MAC
+			0x08, 0x09, 'A', 'B', '5', '3', '9', '6', '!'}; // 0x09: "Complete Local Name"
+		ble_send_raw_packet(37, 0x02, payload, sizeof(payload));
+		ble_send_raw_packet(38, 0x02, payload, sizeof(payload));
+		ble_send_raw_packet(39, 0x02, payload, sizeof(payload));
+		ush_print(self, "Advertisement sent.");
+	}
+	else {
+		ush_print_status(self, USH_STATUS_ERROR_COMMAND_WRONG_ARGUMENTS);
+	}
 }
 
 /*

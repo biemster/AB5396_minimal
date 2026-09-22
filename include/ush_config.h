@@ -7,16 +7,16 @@
 /* Enable a minimal set of commands to reduce footprint */
 #define USH_CONFIG_ENABLE_COMMAND_HELP   1
 #define USH_CONFIG_ENABLE_COMMAND_CAT    1
-#define USH_CONFIG_ENABLE_COMMAND_CD     0
+#define USH_CONFIG_ENABLE_COMMAND_CD     1
 #define USH_CONFIG_ENABLE_COMMAND_LS     1
-#define USH_CONFIG_ENABLE_COMMAND_PWD    0
+#define USH_CONFIG_ENABLE_COMMAND_PWD    1
 #define USH_CONFIG_ENABLE_COMMAND_ECHO   1
 #define USH_CONFIG_ENABLE_COMMAND_XXD    1
 
 /* Features */
 #define USH_CONFIG_ENABLE_FEATURE_COMMANDS     1
-#define USH_CONFIG_ENABLE_FEATURE_AUTOCOMPLETE 0
-#define USH_CONFIG_ENABLE_FEATURE_SHELL_STYLES 0
+#define USH_CONFIG_ENABLE_FEATURE_AUTOCOMPLETE 1
+#define USH_CONFIG_ENABLE_FEATURE_SHELL_STYLES 1
 
 /* Command configs */
 #define USH_CONFIG_FILENAME_ALIGN_SPACE 16
@@ -37,9 +37,6 @@
 #define USH_CONFIG_TRANSLATION_NO_HELP_AVAILABLE         "no_help_available"
 #define USH_CONFIG_TRANSLATION_FILE_NOT_FOUND            "file_not_found"
 #define USH_CONFIG_TRANSLATION_READ_ONLY_FILE            "read_only_file"
-
-/* Freestanding assert: halt in an infinite loop — replace with your fault handler */
-// #define USH_ASSERT(cond) do { if (!(cond)) { while(1) { /* trap */ } } } while(0)
 
 /* USH_ASSERT: call application handler on failure (no stdio) */
 void ush_assert_failed(const char *file, int line);
