@@ -10,8 +10,24 @@ MICROSHELL_DIR ?= ../microshell
 MAIN_FLASH_OFFSET ?= 0x00001000
 
 ARCH    := -march=rv32imac_zicsr -mabi=ilp32
-CFLAGS  := $(ARCH) -mstrict-align -Wall -ffreestanding -nostartfiles -ffunction-sections -fdata-sections -Iinclude -I$(MICROSHELL_DIR)/src -DUSH_CONFIG_CUSTOM_FILE=\"ush_config.h\"
-LDFLAGS := -mstrict-align --specs=nano.specs --specs=nosys.specs -Wl,--gc-sections -Wl,--undefined=g_ush_buildin_commands -Wl,--no-warn-rwx-segments -lc -lgcc
+CFLAGS  := $(ARCH) \
+		-mstrict-align \
+		-mno-relax \
+		-Wall \
+		-ffreestanding \
+		-nostartfiles \
+		-ffunction-sections \
+		-fdata-sections \
+		-Iinclude \
+		-I$(MICROSHELL_DIR)/src -DUSH_CONFIG_CUSTOM_FILE=\"ush_config.h\"
+
+LDFLAGS := -mstrict-align \
+		-mno-relax \
+		--specs=nano.specs --specs=nosys.specs \
+		-Wl,--gc-sections \
+		-Wl,--undefined=g_ush_buildin_commands \
+		-Wl,--no-warn-rwx-segments \
+		-lc -lgcc
 
 # Microshell source files (the repo stores sources in src/src and commands in src/src/commands)
 MICRO_SRCS := $(MICROSHELL_DIR)/src/src/ush.c \

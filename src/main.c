@@ -73,32 +73,28 @@ __attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr12(v
 __attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr13(void) { isr_vector_counter[13]++; }
 __attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr14(void) { isr_vector_counter[14]++; }
 __attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr15(void) { isr_vector_counter[15]++; }
-//__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr16(void) { isr_vector_counter[16]++; }
-//__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr17(void) { isr_vector_counter[17]++; }
-//__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr18(void) { isr_vector_counter[18]++; }
-//__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr19(void) { isr_vector_counter[19]++; }
-//__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr20(void) { isr_vector_counter[20]++; }
-//__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr21(void) { isr_vector_counter[21]++; }
-//__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr22(void) { isr_vector_counter[22]++; }
-//__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr23(void) { isr_vector_counter[23]++; }
-//__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr24(void) { isr_vector_counter[24]++; }
-//__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr25(void) { isr_vector_counter[25]++; }
-//__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr26(void) { isr_vector_counter[26]++; }
-//__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr27(void) { isr_vector_counter[27]++; }
-//__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr28(void) { isr_vector_counter[28]++; }
-//__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr29(void) { isr_vector_counter[29]++; }
-//__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr30(void) { isr_vector_counter[30]++; }
-//__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr31(void) { isr_vector_counter[31]++; }
-
-__attribute__((section(".isr")))
-__attribute__((interrupt))
-void usb_isr_wrapper(void) {
-	bt_usb_isr(); // Call our stack's handler
-}
+#if VECTOR_SIZE == 32
+__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr16(void) { isr_vector_counter[16]++; }
+__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr17(void) { isr_vector_counter[17]++; }
+__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr18(void) { isr_vector_counter[18]++; }
+__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr19(void) { isr_vector_counter[19]++; }
+__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr20(void) { isr_vector_counter[20]++; }
+__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr21(void) { isr_vector_counter[21]++; }
+__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr22(void) { isr_vector_counter[22]++; }
+__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr23(void) { isr_vector_counter[23]++; }
+__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr24(void) { isr_vector_counter[24]++; }
+__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr25(void) { isr_vector_counter[25]++; }
+__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr26(void) { isr_vector_counter[26]++; }
+__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr27(void) { isr_vector_counter[27]++; }
+__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr28(void) { isr_vector_counter[28]++; }
+__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr29(void) { isr_vector_counter[29]++; }
+__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr30(void) { isr_vector_counter[30]++; }
+__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr31(void) { isr_vector_counter[31]++; }
+#endif
 
 /* No section attribute required, GCC naturally puts this in RAM (.data) */
-__attribute__((aligned(256)))
-void *isr_vector_table[VECTOR_SIZE] = {0};
+__attribute__((section(".vectors"), aligned(256)))
+void *isr_vector_table[VECTOR_SIZE];
 
 uint32_t isr_vector_counter_get(size_t index) {
 	return (index < VECTOR_SIZE) ? isr_vector_counter[index] : 0;
@@ -139,10 +135,13 @@ static int uart0_poll(void) {
 static int ush_read_cb(struct ush_object *self, char *ch) {
 	(void)self;
 	int v = -1;
+#ifdef BLUETRUM_USB_H
 	if(bt_cdc_is_connected()) {
 		v = bt_cdc_read_char();
 	}
-	else {
+	else
+#endif
+	{
 		v = uart0_poll();
 		uart0_singlewire_inchar = v;
 	}
@@ -154,10 +153,13 @@ static int ush_read_cb(struct ush_object *self, char *ch) {
 
 static int ush_write_cb(struct ush_object *self, char c) {
 	(void)self;
+#ifdef BLUETRUM_USB_H
 	if (bt_cdc_is_connected()) {
 		bt_cdc_write_char(c); /* Blocking with safety timeout */
 	}
-	else {
+	else
+#endif
+	{
 		if(c != (char)(uart0_singlewire_inchar & 0xff)) {
 			ROM_UART0_PUTCHAR(c);
 		}
@@ -245,30 +247,39 @@ int main(void) {
 	isr_vector_table[12] = (void *)default_isr12;
 	isr_vector_table[13] = (void *)default_isr13;
 	isr_vector_table[14] = (void *)default_isr14;
-	isr_vector_table[15] = (void *)usb_isr_wrapper;
-//	isr_vector_table[16] = (void *)default_isr16;
-//	isr_vector_table[17] = (void *)default_isr17;
-//	isr_vector_table[18] = (void *)default_isr18;
-//	isr_vector_table[19] = (void *)default_isr19;
-//	isr_vector_table[20] = (void *)default_isr20;
-//	isr_vector_table[21] = (void *)default_isr21;
-//	isr_vector_table[22] = (void *)default_isr22;
-//	isr_vector_table[23] = (void *)default_isr23;
-//	isr_vector_table[24] = (void *)default_isr24;
-//	isr_vector_table[25] = (void *)default_isr25;
-//	isr_vector_table[26] = (void *)default_isr26;
-//	isr_vector_table[27] = (void *)default_isr27;
-//	isr_vector_table[28] = (void *)default_isr28;
-//	isr_vector_table[29] = (void *)default_isr29;
-//	isr_vector_table[30] = (void *)default_isr30;
-//	isr_vector_table[31] = (void *)default_isr31;
+#ifdef BLUETRUM_USB_H
+	isr_vector_table[15] = (void *)bt_usb_isr;
+#else
+	isr_vector_table[15] = (void *)default_isr15;
+#endif
+
+#if VECTOR_SIZE == 32
+	isr_vector_table[16] = (void *)default_isr16;
+	isr_vector_table[17] = (void *)default_isr17;
+	isr_vector_table[18] = (void *)default_isr18;
+	isr_vector_table[19] = (void *)default_isr19;
+	isr_vector_table[20] = (void *)default_isr20;
+	isr_vector_table[21] = (void *)default_isr21;
+	isr_vector_table[22] = (void *)default_isr22;
+	isr_vector_table[23] = (void *)default_isr23;
+	isr_vector_table[24] = (void *)default_isr24;
+	isr_vector_table[25] = (void *)default_isr25;
+	isr_vector_table[26] = (void *)default_isr26;
+	isr_vector_table[27] = (void *)default_isr27;
+	isr_vector_table[28] = (void *)default_isr28;
+	isr_vector_table[29] = (void *)default_isr29;
+	isr_vector_table[30] = (void *)default_isr30;
+	isr_vector_table[31] = (void *)default_isr31;
+#endif
 	PICADR = (uint32_t)isr_vector_table;
 
+#ifdef BLUETRUM_USB_H
 	/* Init USB CDC ACM */
 	bt_usb_init();
 	PICPR |= 0x80; // Set interrupt priority/routing for USB
 	PICEN |= 0x80; // Enable the USB interrupt line in the PIC
 	PICCON |= 0x10007;
+#endif
 
 	/* microshell hostname */
 	strcpy(g_hostname, "AB5396");
@@ -276,8 +287,8 @@ int main(void) {
 	/* initialize shell object and descriptor */
 	memset(&g_ush, 0, sizeof(g_ush));
 	ush_init(&g_ush, &ush_desc);
-	ush_commands_add( &g_ush, &g_radio_cmd_node, g_radio_cmd_files, (sizeof(g_radio_cmd_files) / sizeof(g_radio_cmd_files[0])) );
-	ush_commands_add( &g_ush, &g_isr_counts_cmd_node, g_isr_counts_cmd_files, (sizeof(g_isr_counts_cmd_files) / sizeof(g_isr_counts_cmd_files[0])) );
+//	ush_commands_add( &g_ush, &g_radio_cmd_node, g_radio_cmd_files, (sizeof(g_radio_cmd_files) / sizeof(g_radio_cmd_files[0])) );
+//	ush_commands_add( &g_ush, &g_isr_counts_cmd_node, g_isr_counts_cmd_files, (sizeof(g_isr_counts_cmd_files) / sizeof(g_isr_counts_cmd_files[0])) );
 
 	/* mount root node (empty root for now) */
 	ush_node_mount(&g_ush, "/", &g_root, NULL, 0);

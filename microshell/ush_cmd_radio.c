@@ -102,62 +102,62 @@ void radio_ctrl_service(struct ush_object *self, struct ush_file_descriptor cons
 
 	case USH_STATE_PROCESS_SERVICE:
 		if(self->process_index == RADIO_DUMPREGS) {
-//			if (self->process_index_item <= 0xFF) {
-//				uint32_t value;
-//
-//				if (rf_reg_rd((uint8_t)self->process_index_item, &value) == 0) {
-//					ush_write_pointer(
-//						self,
-//						"radio_ctrl: SPI transfer timeout\r\n",
-//						USH_STATE_RESET_PROMPT
-//					);
-//					break;
-//				}
-//
-//				(void)snprintf(
-//					output,
-//					self->desc->output_buffer_size,
-//					"RF_REG[0x%02lX] = 0x%08lX\r\n",
-//					(unsigned long)self->process_index_item,
-//					(unsigned long)value
-//				);
-//
-//				self->process_index_item++;
-//
-//				ush_write_pointer(self, output, USH_STATE_PROCESS_SERVICE);
-//			}
-//			else {
-//				ush_write_pointer(self, "--- DUMP COMPLETE ---\r\n", USH_STATE_RESET_PROMPT);
-//			}
+			if (self->process_index_item <= 0xFF) {
+				uint32_t value;
+
+				if (rf_reg_rd((uint8_t)self->process_index_item, &value) == 0) {
+					ush_write_pointer(
+						self,
+						"radio_ctrl: SPI transfer timeout\r\n",
+						USH_STATE_RESET_PROMPT
+					);
+					break;
+				}
+
+				(void)snprintf(
+					output,
+					self->desc->output_buffer_size,
+					"RF_REG[0x%02lX] = 0x%08lX\r\n",
+					(unsigned long)self->process_index_item,
+					(unsigned long)value
+				);
+
+				self->process_index_item++;
+
+				ush_write_pointer(self, output, USH_STATE_PROCESS_SERVICE);
+			}
+			else {
+				ush_write_pointer(self, "--- DUMP COMPLETE ---\r\n", USH_STATE_RESET_PROMPT);
+			}
 		}
-//		else if(self->process_index == RADIO_BB_CLOCK) {
-//			if (self->process_index_item <= 0xFF) {
-//				uint32_t clk1 = BB_NATIVE_CLK & 0x00FFFFFF;
-//				for(volatile int d = 0; d < 100; d++);
-//				uint32_t clk2 = BB_NATIVE_CLK & 0x00FFFFFF;
-//
-//				(void)snprintf(
-//					output,
-//					self->desc->output_buffer_size,
-//					"%lu - %lu d(%lu)\r\n", clk1, clk2, (clk1 - clk2)
-//				);
-//
-//				self->process_index_item++;
-//
-//				ush_write_pointer(self, output, USH_STATE_PROCESS_SERVICE);
-//			}
-//			else {
-//				ush_write_pointer(self, "---\r\n", USH_STATE_RESET_PROMPT);
-//			}
-//		}
+		else if(self->process_index == RADIO_BB_CLOCK) {
+			if (self->process_index_item <= 0xFF) {
+				uint32_t clk1 = BB_NATIVE_CLK & 0x00FFFFFF;
+				for(volatile int d = 0; d < 100; d++);
+				uint32_t clk2 = BB_NATIVE_CLK & 0x00FFFFFF;
+
+				(void)snprintf(
+					output,
+					self->desc->output_buffer_size,
+					"%lu - %lu d(%lu)\r\n", clk1, clk2, (clk1 - clk2)
+				);
+
+				self->process_index_item++;
+
+				ush_write_pointer(self, output, USH_STATE_PROCESS_SERVICE);
+			}
+			else {
+				ush_write_pointer(self, "---\r\n", USH_STATE_RESET_PROMPT);
+			}
+		}
 		else if(self->process_index == RADIO_ADVERTISE) {
 			if(self->process_index_item > 0) {
 				const uint8_t adv_payload[] = {
 						0x11, 0x22, 0x33, 0x44, 0x55, 0x66, // MAC
 						0x08, 0x09, 'A', 'B', '5', '3', '9', '6', '!'}; // 0x09: "Complete Local Name"
 				ble_send_raw_packet_dtm(37, 0x02, adv_payload, sizeof(adv_payload));
-				// ble_send_raw_packet_dtm(38, 0x02, adv_payload, sizeof(adv_payload));
-				// ble_send_raw_packet_dtm(39, 0x02, adv_payload, sizeof(adv_payload));
+				ble_send_raw_packet_dtm(38, 0x02, adv_payload, sizeof(adv_payload));
+				ble_send_raw_packet_dtm(39, 0x02, adv_payload, sizeof(adv_payload));
 
 				self->process_index_item--;
 				ush_write_pointer(self, ".", USH_STATE_PROCESS_SERVICE);

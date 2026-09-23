@@ -369,6 +369,7 @@ static void bt_usb_ep1_kick(void) {
 	for (volatile int d = 0; d < 6; d++);
 }
 
+__attribute__((interrupt))
 ISR_FUNC
 void bt_usb_isr(void) {
 	uint32_t saved_idx = UINDEX;

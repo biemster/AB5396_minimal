@@ -32,9 +32,7 @@ _start:
 	blt a0, a1, 3b
 4:
 	/* 5. Call libc initialization (sets up memory, statics, etc.) */
-	la a0, __libc_init_array
-	beqz a0, 5f
-	jalr a0
+	call __libc_init_array
 5:
 	/* 6. Enter Main */
 	call main
