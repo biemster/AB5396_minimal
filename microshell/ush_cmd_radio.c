@@ -29,13 +29,11 @@ SOFTWARE.
 #include "inc/ush_internal.h"
 #include "iSLER.h"
 
-/*
- * Start the register dump.
- */
-static void dump_rf_registers_start(struct ush_object *self, struct ush_file_descriptor const *file) {
-	self->process_index = 0U;
-	ush_process_start(self, file);
-}
+typedef enum {
+	RADIO_DUMPREGS,
+	RADIO_BB_CLOCK,
+	RADIO_ADVERTISE
+} ush_radio_ctrl_cmds_t;
 
 /*
  * Command callback.
@@ -45,13 +43,16 @@ static void dump_rf_registers_start(struct ush_object *self, struct ush_file_des
 void radio_ctrl_callback(struct ush_object *self, struct ush_file_descriptor const *file, int argc, char *argv[]) {
 	(void)file;
 
-	if (argc != 2) {
+	if (argc != 2 && argc != 3) {
 		ush_print_status(self, USH_STATUS_ERROR_COMMAND_WRONG_ARGUMENTS);
 		return;
 	}
 
 	if (strcmp(argv[1], "--dumpregs") == 0) {
-		dump_rf_registers_start(self, file);
+		// we are abusing the process_index fields for this
+		self->process_index = RADIO_DUMPREGS;
+		self->process_index_item = 0;
+		ush_process_start(self, file);
 	}
 	else if (strcmp(argv[1], "--init") == 0) {
 		rf_init();
@@ -59,20 +60,14 @@ void radio_ctrl_callback(struct ush_object *self, struct ush_file_descriptor con
 		ush_print(self, "RF+BLE init complete.");
 	}
 	else if (strcmp(argv[1], "--clk") == 0) {
-		uint32_t clk1 = BB_NATIVE_CLK & 0x00FFFFFF;
-		for(volatile int d = 0; d < 10000; d++);
-		uint32_t clk2 = BB_NATIVE_CLK & 0x00FFFFFF;
-		uint32_t diff = (clk2 - clk1) & 0x0FFFFFFF;
-		ush_printf(self, "BaseBand clock advance in 10k CPU ticks: %lu\r\n", diff);
+		self->process_index = RADIO_BB_CLOCK;
+		self->process_index_item = 0;
+		ush_process_start(self, file);
 	}
 	else if (strcmp(argv[1], "--adv") == 0) {
-		const uint8_t payload[] = {
-			0x11, 0x22, 0x33, 0x44, 0x55, 0x66, // MAC
-			0x08, 0x09, 'A', 'B', '5', '3', '9', '6', '!'}; // 0x09: "Complete Local Name"
-		ble_send_raw_packet(37, 0x02, payload, sizeof(payload));
-		ble_send_raw_packet(38, 0x02, payload, sizeof(payload));
-		ble_send_raw_packet(39, 0x02, payload, sizeof(payload));
-		ush_print(self, "Advertisement sent.");
+		self->process_index = RADIO_ADVERTISE;
+		self->process_index_item = (argc == 3) ? atoi(argv[2]) : 1;
+		ush_process_start(self, file);
 	}
 	else {
 		ush_print_status(self, USH_STATUS_ERROR_COMMAND_WRONG_ARGUMENTS);
@@ -87,46 +82,89 @@ void radio_ctrl_callback(struct ush_object *self, struct ush_file_descriptor con
  * MicroShell returns here with self->state set to the state supplied
  * as the second argument.
  */
-void dump_rf_registers_service(struct ush_object *self, struct ush_file_descriptor const *file) {
+void radio_ctrl_service(struct ush_object *self, struct ush_file_descriptor const *file) {
 	char *output = self->desc->output_buffer;
 
 	(void)file;
 
 	switch (self->state) {
 	case USH_STATE_PROCESS_START:
-		ush_write_pointer(
-			self,
-			"--- DUMPING BLUETRUM RF REGISTERS ---\r\n",
-			USH_STATE_PROCESS_SERVICE
-		);
+		if(self->process_index == RADIO_DUMPREGS) {
+			ush_write_pointer(self, "--- DUMPING BLUETRUM RF REGISTERS ---\r\n", USH_STATE_PROCESS_SERVICE);
+		}
+		else if(self->process_index == RADIO_BB_CLOCK) {
+			ush_write_pointer(self, "BB clock diffs after 100 ticks:\r\n", USH_STATE_PROCESS_SERVICE);
+		}
+		else if(self->process_index == RADIO_ADVERTISE) {
+			ush_write_pointer(self, "Advertising: ", USH_STATE_PROCESS_SERVICE);
+		}
 		break;
 
 	case USH_STATE_PROCESS_SERVICE:
-		if (self->process_index <= 0xFFU) {
-			uint32_t value;
+		if(self->process_index == RADIO_DUMPREGS) {
+//			if (self->process_index_item <= 0xFF) {
+//				uint32_t value;
+//
+//				if (rf_reg_rd((uint8_t)self->process_index_item, &value) == 0) {
+//					ush_write_pointer(
+//						self,
+//						"radio_ctrl: SPI transfer timeout\r\n",
+//						USH_STATE_RESET_PROMPT
+//					);
+//					break;
+//				}
+//
+//				(void)snprintf(
+//					output,
+//					self->desc->output_buffer_size,
+//					"RF_REG[0x%02lX] = 0x%08lX\r\n",
+//					(unsigned long)self->process_index_item,
+//					(unsigned long)value
+//				);
+//
+//				self->process_index_item++;
+//
+//				ush_write_pointer(self, output, USH_STATE_PROCESS_SERVICE);
+//			}
+//			else {
+//				ush_write_pointer(self, "--- DUMP COMPLETE ---\r\n", USH_STATE_RESET_PROMPT);
+//			}
+		}
+//		else if(self->process_index == RADIO_BB_CLOCK) {
+//			if (self->process_index_item <= 0xFF) {
+//				uint32_t clk1 = BB_NATIVE_CLK & 0x00FFFFFF;
+//				for(volatile int d = 0; d < 100; d++);
+//				uint32_t clk2 = BB_NATIVE_CLK & 0x00FFFFFF;
+//
+//				(void)snprintf(
+//					output,
+//					self->desc->output_buffer_size,
+//					"%lu - %lu d(%lu)\r\n", clk1, clk2, (clk1 - clk2)
+//				);
+//
+//				self->process_index_item++;
+//
+//				ush_write_pointer(self, output, USH_STATE_PROCESS_SERVICE);
+//			}
+//			else {
+//				ush_write_pointer(self, "---\r\n", USH_STATE_RESET_PROMPT);
+//			}
+//		}
+		else if(self->process_index == RADIO_ADVERTISE) {
+			if(self->process_index_item > 0) {
+				const uint8_t adv_payload[] = {
+						0x11, 0x22, 0x33, 0x44, 0x55, 0x66, // MAC
+						0x08, 0x09, 'A', 'B', '5', '3', '9', '6', '!'}; // 0x09: "Complete Local Name"
+				ble_send_raw_packet_dtm(37, 0x02, adv_payload, sizeof(adv_payload));
+				// ble_send_raw_packet_dtm(38, 0x02, adv_payload, sizeof(adv_payload));
+				// ble_send_raw_packet_dtm(39, 0x02, adv_payload, sizeof(adv_payload));
 
-			if (rf_reg_rd((uint8_t)self->process_index, &value) == 0) {
-				ush_write_pointer(
-					self,
-					"radio_ctrl: SPI transfer timeout\r\n",
-					USH_STATE_RESET_PROMPT
-				);
-				break;
+				self->process_index_item--;
+				ush_write_pointer(self, ".", USH_STATE_PROCESS_SERVICE);
 			}
-
-			(void)snprintf(
-				output,
-				self->desc->output_buffer_size,
-				"RF_REG[0x%02lX] = 0x%08lX\r\n",
-				(unsigned long)self->process_index,
-				(unsigned long)value
-			);
-
-			self->process_index++;
-
-			ush_write_pointer(self, output, USH_STATE_PROCESS_SERVICE);
-		} else {
-			ush_write_pointer(self, "--- DUMP COMPLETE ---\r\n", USH_STATE_RESET_PROMPT);
+			else {
+				ush_write_pointer(self, "\r\n--- done ---\r\n", USH_STATE_RESET_PROMPT);
+			}
 		}
 		break;
 

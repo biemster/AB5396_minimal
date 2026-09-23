@@ -55,7 +55,8 @@ static void uart0_print_string(const char *str) {
  * The "interrupt" attribute is critical for RISC-V so the compiler 
  * generates an `mret` and saves all registers
  */
-static uint32_t isr_vector_counter[16] = {0};
+#define VECTOR_SIZE 16
+static uint32_t isr_vector_counter[VECTOR_SIZE] = {0};
 __attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr0(void) { isr_vector_counter[0]++; }
 __attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr1(void) { isr_vector_counter[1]++; }
 __attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr2(void) { isr_vector_counter[2]++; }
@@ -72,6 +73,22 @@ __attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr12(v
 __attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr13(void) { isr_vector_counter[13]++; }
 __attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr14(void) { isr_vector_counter[14]++; }
 __attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr15(void) { isr_vector_counter[15]++; }
+//__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr16(void) { isr_vector_counter[16]++; }
+//__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr17(void) { isr_vector_counter[17]++; }
+//__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr18(void) { isr_vector_counter[18]++; }
+//__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr19(void) { isr_vector_counter[19]++; }
+//__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr20(void) { isr_vector_counter[20]++; }
+//__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr21(void) { isr_vector_counter[21]++; }
+//__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr22(void) { isr_vector_counter[22]++; }
+//__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr23(void) { isr_vector_counter[23]++; }
+//__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr24(void) { isr_vector_counter[24]++; }
+//__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr25(void) { isr_vector_counter[25]++; }
+//__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr26(void) { isr_vector_counter[26]++; }
+//__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr27(void) { isr_vector_counter[27]++; }
+//__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr28(void) { isr_vector_counter[28]++; }
+//__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr29(void) { isr_vector_counter[29]++; }
+//__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr30(void) { isr_vector_counter[30]++; }
+//__attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr31(void) { isr_vector_counter[31]++; }
 
 __attribute__((section(".isr")))
 __attribute__((interrupt))
@@ -81,27 +98,10 @@ void usb_isr_wrapper(void) {
 
 /* No section attribute required, GCC naturally puts this in RAM (.data) */
 __attribute__((aligned(256)))
-void *isr_vector_table[16] = {
-	(void*)0x00000000, /* 0x00: Ignored by PIC during IRQs */
-	(void*)0x00000000, /* 0x04: ISR1 */
-	(void*)0x00000000, /* 0x08: ISR2 */
-	(void*)0x00000000, /* 0x0C: ISR3 */
-	(void*)0x00000000, /* 0x10: ISR4 */
-	(void*)0x00000000, /* 0x14: ISR5 */
-	(void*)0x00000000, /* 0x18: ISR6 */
-	(void*)0x00000000, /* 0x1C: ISR7 */
-	(void*)0x00084020, /* 0x20: ISR8 XIP Cache NMI handler */
-	(void*)0x00000000, /* 0x24: ISR9 */
-	(void*)0x00000000, /* 0x28: ISR10 */
-	(void*)0x00000000, /* 0x2C: ISR11 */
-	(void*)0x00000000, /* 0x30: ISR12 */
-	(void*)0x00000000, /* 0x34: ISR13 */
-	(void*)0x00000000, /* 0x38: ISR14 */
-	(void*)0x00000000  /* 0x3C: ISR15 USB */
-};
+void *isr_vector_table[VECTOR_SIZE] = {0};
 
 uint32_t isr_vector_counter_get(size_t index) {
-	return (index < 16) ? isr_vector_counter[index] : 0;
+	return (index < VECTOR_SIZE) ? isr_vector_counter[index] : 0;
 }
 
 /* called from USH_ASSERT on failure */
@@ -205,18 +205,18 @@ static const struct ush_file_descriptor g_isr_counts_cmd_files[] = {
 
 // "radio_ctrl" command
 extern void radio_ctrl_callback(struct ush_object *self, struct ush_file_descriptor const *file, int argc, char *argv[]);
-extern void dump_rf_registers_service(struct ush_object *self, struct ush_file_descriptor const *file);
+extern void radio_ctrl_service(struct ush_object *self, struct ush_file_descriptor const *file);
 static const struct ush_file_descriptor g_radio_cmd_files[] = {
 	{
 		.name = "radio_ctrl",
 		.description = "dump Bluetrum RF registers",
 		.help = "usage: radio_ctrl\r\n"
 				"       radio_ctrl --init\r\n"
-				"       radio_ctrl --adv\r\n"
+				"       radio_ctrl --adv [nadv]\r\n"
 				"       radio_ctrl --clk\r\n"
 				"       radio_ctrl --dumpregs\r\n",
 		.exec = radio_ctrl_callback,
-		.process = dump_rf_registers_service,
+		.process = radio_ctrl_service,
 	},
 };
 
@@ -238,7 +238,7 @@ int main(void) {
 	isr_vector_table[5] = (void *)default_isr5;
 	isr_vector_table[6] = (void *)default_isr6;
 	isr_vector_table[7] = (void *)default_isr7;
-	// isr_vector_table[8] = (void *)default_isr8; // XIP ISR, don't change!
+	isr_vector_table[8] = (void *)0x00084020, // 0x20: ISR8 XIP Cache NMI handler, don't change!
 	isr_vector_table[9] = (void *)default_isr9;
 	isr_vector_table[10] = (void *)default_isr10;
 	isr_vector_table[11] = (void *)default_isr11;
@@ -246,6 +246,22 @@ int main(void) {
 	isr_vector_table[13] = (void *)default_isr13;
 	isr_vector_table[14] = (void *)default_isr14;
 	isr_vector_table[15] = (void *)usb_isr_wrapper;
+//	isr_vector_table[16] = (void *)default_isr16;
+//	isr_vector_table[17] = (void *)default_isr17;
+//	isr_vector_table[18] = (void *)default_isr18;
+//	isr_vector_table[19] = (void *)default_isr19;
+//	isr_vector_table[20] = (void *)default_isr20;
+//	isr_vector_table[21] = (void *)default_isr21;
+//	isr_vector_table[22] = (void *)default_isr22;
+//	isr_vector_table[23] = (void *)default_isr23;
+//	isr_vector_table[24] = (void *)default_isr24;
+//	isr_vector_table[25] = (void *)default_isr25;
+//	isr_vector_table[26] = (void *)default_isr26;
+//	isr_vector_table[27] = (void *)default_isr27;
+//	isr_vector_table[28] = (void *)default_isr28;
+//	isr_vector_table[29] = (void *)default_isr29;
+//	isr_vector_table[30] = (void *)default_isr30;
+//	isr_vector_table[31] = (void *)default_isr31;
 	PICADR = (uint32_t)isr_vector_table;
 
 	/* Init USB CDC ACM */

@@ -91,7 +91,15 @@ The Baseband (BB) engine operates at `0xF000` and utilizes CEVA RivieraWaves arc
 ---
 
 ## 5. Exchange Memory (EM) & Data Structures
-The MAC reads descriptors from a dedicated SRAM block at base `0x10000`. Control Structures (CS) are placed at specific offsets. 
+The MAC reads descriptors from a dedicated SRAM block at base `0x10000`. Control Structures (CS) are placed at specific offsets.\
+The CS blocks (CS0, CS1, CS2) are the payloads that describe what to do (channel, AA, CRC).\
+The Event Descriptors (allocated by the BootROM at 0x10400) describe when to do it.\
+
+An Event Descriptor typically contains:
+1. A pointer to the next Event Descriptor.
+2. The BB_CLK target timestamp (when to fire).
+3. A pointer to the associated Control Structure (e.g., CS0 or CS2).
+4. Status/IRQ routing bits.
 
 ### 5.1 Control Structure Offsets
 The CEVA RW MAC expects multiple connection/advertising state structures:
@@ -116,6 +124,8 @@ struct ll_em_block {
 ### 5.3 Auxiliary EM Configurations (Discovered in `ble_tx_test_do`)
 * **TX Header Descriptors (`0x1124C`):** The hardware does *not* read the BLE packet header from the payload DMA pointer. The length and PDU type must be written to `0x1124C` as `(len << 8) | (pdu_type)`.
 * **Inter-Frame Gap Timers (`0x10D70` - `0x10D8C`):** Array of timers used to handle auto-repeating bursts in test modes.
+
+*Note: These are RAM address the BootROM uses, it's not known if the RF peripheral is hardcoded to use these or it's runtime configured.*
 
 ---
 

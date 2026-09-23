@@ -22,7 +22,7 @@
 #define REG32(addr)  (*(volatile uint32_t *)(uintptr_t)(addr))
 #endif
 
-#define ISR7_CALLBACK REG32(0x00010044)
+#define ISR8_CALLBACK REG32(0x00010044)
 
 /* ROM Functions */
 typedef void (*rom_uart0_init)(void);
@@ -124,7 +124,7 @@ void stage1(void) {
 	 * 2. INITIALIZE XIP HARDWARE
 	 * No magic word received; proceed to boot main firmware.
 	 */
-	ISR7_CALLBACK = (uint32_t)(uintptr_t)&xip_callback;
+	ISR8_CALLBACK = (uint32_t)(uintptr_t)&xip_callback;
 
 	XIP_CMD   = 0x00000342;
 	XIP_CTRL  = 1;

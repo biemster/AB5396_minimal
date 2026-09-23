@@ -148,38 +148,39 @@ void ble_baseband_init(void) {
 }
 
 // 2. Transmit a raw Link Layer packet
-void ble_send_raw_packet(uint8_t phys_channel, uint8_t pdu_type, const uint8_t *payload, uint8_t len) {
-	// 1. Auxiliary Header Registers (This is the ACTUAL Link Layer Header)
-	*(volatile uint16_t*)(0x1124A) = 0x0000;
+void ble_send_raw_packet_dtm(uint8_t phys_channel, uint8_t pdu_type, const uint8_t *payload, uint8_t len) {
+	// 1. Auxiliary Header Registers
 	*(volatile uint16_t*)(0x1124C) = (len << 8) | (pdu_type & 0x0F);
 	
-	// 2. Exact EM Block configuration
-	*(volatile uint8_t *) (EM_BASE_ADDR + 0x00) = 0x1C;
-	*(volatile uint16_t*)(EM_BASE_ADDR + 0x02) = 0xBED6;       // AA Lower
-	*(volatile uint32_t*)(EM_BASE_ADDR + 0x04) = 0x55558E89;   // AA Upper | CRC Lower
-	*(volatile uint16_t*)(EM_BASE_ADDR + 0x08) = 0x0055;       // CRC Upper
-	*(volatile uint16_t*)(EM_BASE_ADDR + 0x0A) = phys_channel; 
-	*(volatile uint32_t*)(EM_BASE_ADDR + 0x0C) = 0x80000000 | TX_BUF_ADDR; 
-	*(volatile uint16_t*)(EM_BASE_ADDR + 0x10) = 0x064A; 
-	*(volatile uint16_t*)(EM_BASE_ADDR + 0x16) = 0x0960;
+	// 2. Exact EM Block configuration for CS2 (0x10EDC)
+	volatile uint8_t* cs2 = (volatile uint8_t*)0x10EDC;
+	*(volatile uint16_t*)(cs2 + 0x00) = 0x001C;
+	*(volatile uint16_t*)(cs2 + 0x02) = 0xBED6;       // AA Lower
+	*(volatile uint32_t*)(cs2 + 0x04) = 0x55558E89;   // AA Upper | CRC Lower
+	*(volatile uint16_t*)(cs2 + 0x08) = 0x0055;       // CRC Upper
+	*(volatile uint16_t*)(cs2 + 0x0A) = phys_channel; 
+	*(volatile uint32_t*)(cs2 + 0x0C) = 0x80000000 | TX_BUF_ADDR; 
+	*(volatile uint16_t*)(cs2 + 0x10) = 0x064A; 
+	*(volatile uint16_t*)(cs2 + 0x16) = 0x0960;
 	
-	// 3. Write ONLY the payload to the TX Buffer (No Header!)
-	volatile uint8_t *tx_buf = (volatile uint8_t *)TX_BUF_ADDR;
-	memcpy((void*)tx_buf, payload, len);
+	// 3. Write payload (ensure 32-bit alignment if required by DMA)
+	memcpy((void*)TX_BUF_ADDR, payload, len);
 
-	// 4. Arm the DMA
-	BB_DMA_PTR = EM_BASE_ADDR;
-	
-	// 5. Fire Transmitter
-	BB_CTRL |= (1 << 18); 
-	// Set Start Task (Bit 12) AND Enable Whitening (Bit 13)
-	BB_TASK_START |= (1 << 12) | (1 << 13); 
+	// DO NOT OVERWRITE BB_DMA_PTR (0xF02C) HERE!
 
-	// 6. Wait for TX to finish
-	uint32_t timeout = 50000;
-	while (((BB_INT_STAT & 0x02) == 0) && timeout > 0) timeout--;
-	
-	// 7. Clear interrupt and stop MAC
-	BB_INT_CLR = 0x02;
-	BB_CTRL &= ~(1 << 18);
+	// 4. Enable Global TX
+	BB_CTRL |= 0x40000; 
+
+	// 5. Fire Transmitter: Set Bit 12, Clear Bit 13
+	uint32_t task_strt = BB_REG(0x0E0);
+	task_strt &= ~(1 << 13);
+	task_strt |= (1 << 12);
+	BB_REG(0x0E0) = task_strt;
+
+	// 6. Manual cycle-delay abort (since DTM loops infinitely)
+	for(volatile uint32_t i = 0; i < 50000; i++); 
+
+	// 7. Abort and Clear
+	BB_CTRL &= ~0x40000;
+	BB_INT_CLR = 0xFF; // Clear all pending to be safe
 }
