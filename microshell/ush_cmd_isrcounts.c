@@ -31,7 +31,7 @@ SOFTWARE.
 /* Implemented in main.c. */
 extern uint32_t isr_vector_counter_get(size_t index);
 
-#define ISR_VECTOR_COUNTER_COUNT 16
+#define ISR_VECTOR_COUNTER_COUNT 32
 
 /*
  * Start the asynchronous ISR counter dump.

@@ -25,6 +25,9 @@ LDFLAGS := -mstrict-align \
 		-mno-relax \
 		--specs=nano.specs --specs=nosys.specs \
 		-Wl,--gc-sections \
+		-Wl,--print-memory-usage \
+		-Wl,-Map=main.map \
+		-Wl,--cref \
 		-Wl,--undefined=g_ush_buildin_commands \
 		-Wl,--no-warn-rwx-segments \
 		-lc -lgcc

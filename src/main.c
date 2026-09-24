@@ -287,8 +287,8 @@ int main(void) {
 	/* initialize shell object and descriptor */
 	memset(&g_ush, 0, sizeof(g_ush));
 	ush_init(&g_ush, &ush_desc);
-//	ush_commands_add( &g_ush, &g_radio_cmd_node, g_radio_cmd_files, (sizeof(g_radio_cmd_files) / sizeof(g_radio_cmd_files[0])) );
-//	ush_commands_add( &g_ush, &g_isr_counts_cmd_node, g_isr_counts_cmd_files, (sizeof(g_isr_counts_cmd_files) / sizeof(g_isr_counts_cmd_files[0])) );
+	ush_commands_add( &g_ush, &g_radio_cmd_node, g_radio_cmd_files, (sizeof(g_radio_cmd_files) / sizeof(g_radio_cmd_files[0])) );
+	ush_commands_add( &g_ush, &g_isr_counts_cmd_node, g_isr_counts_cmd_files, (sizeof(g_isr_counts_cmd_files) / sizeof(g_isr_counts_cmd_files[0])) );
 
 	/* mount root node (empty root for now) */
 	ush_node_mount(&g_ush, "/", &g_root, NULL, 0);
