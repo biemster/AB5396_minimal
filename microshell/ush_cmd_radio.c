@@ -34,8 +34,9 @@ extern int rf_reg_rd(uint8_t reg_addr, uint32_t *value);
 extern void bb_clk_init(void);
 extern void ble_baseband_init(void);
 extern void ble_send_adv_dtm(uint8_t phys_channel);
-extern void hunt_radio_interrupt(struct ush_object *self);
-#define BB_CLK 0xf020
+extern void hunt_radio_interrupt(uint32_t result[2]);
+extern void poke_ceva_mac(uint32_t result[3]);
+#define BB_CLK (*(volatile uint32_t *)(uintptr_t)(0xf020))
 
 
 typedef enum {
@@ -64,8 +65,14 @@ void radio_ctrl_callback(struct ush_object *self, struct ush_file_descriptor con
 		ush_process_start(self, file);
 	}
 	else if (strcmp(argv[1], "--isrfind") == 0) {
-		hunt_radio_interrupt(self);
-		ush_print(self, "done.");
+		uint32_t res[2] = {0};
+		hunt_radio_interrupt(res);
+		ush_printf(self, "ISR finder: current_pnd:bb_status %lu:%lu\r\n", res[0], res[1]);
+	}
+	else if (strcmp(argv[1], "--cevatask") == 0) {
+		uint32_t res[3] = {0};
+		poke_ceva_mac(res);
+		ush_printf(self, "CEVA RW task STAT:%lu ERR:%lu TIMEOUT:%lu\r\n", res[0], res[1], res[2]);
 	}
 	else if (strcmp(argv[1], "--init") == 0) {
 		rf_init();

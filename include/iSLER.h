@@ -27,11 +27,14 @@
 #define BB_MAC1        BB_REG(0x024)
 #define BB_MAC2        BB_REG(0x028)
 #define BB_GLOBAL_PTR  BB_REG(0x02C)
+#define BB_ERR_CODE    BB_REG(0x060)
 #define BB_TASK_START  BB_REG(0x0E0)
 
 // --- EM and TX Buffers ---
-#define EM_BASE_ADDR   0x10EDC
-#define TX_BUF_ADDR    0x10300
+#define EM_CS2_BASE       0x10EDC
+#define TX_BUF_ADDR       0x10300
+#define EM_HW_EVENT_NODE  0x10400 // Where the MAC hardware looks for schedules
+#define EM_DUMMY_BUF      0x11000
 
 struct ll_em_block {
 	uint16_t state;
@@ -149,74 +152,67 @@ void ble_baseband_init(void) {
 }
 
 // 2. Transmit a raw Link Layer packet
-// EM Addresses
-#define EM_HW_LIST_NODE   0x10400
-#define EM_CS2_BASE       0x10EDC
-#define EM_TX_PAYLOAD_BUF 0x11000 
-
 void ble_send_adv_dtm(uint8_t phys_channel) {
-	// 1. Ensure MAC is stopped and clear any stale interrupts
+	// Clear stale state
 	BB_CTRL &= ~(1 << 18);
 	BB_INT_CLR = 0xFFFFFFFF; 
 
-	// 2. Setup CS2 (0x10EDC)
+	// Setup CS2 (DTM / Manual Mode Control Structure)
 	volatile uint16_t* cs2 = (volatile uint16_t*)EM_CS2_BASE;
 	cs2[0]  = 0x001C;                               // State
 	cs2[1]  = 0xBED6;                               // AA Lower
 	*(volatile uint32_t*)&cs2[2] = 0x55558E89;      // AA Upper | CRC Lower
 	cs2[4]  = 0x0055;                               // CRC Upper
 	cs2[5]  = phys_channel;                         // Channel (37, 38, or 39)
-	*(volatile uint32_t*)&cs2[6] = 0x80000000 | EM_TX_PAYLOAD_BUF; // DMA Payload Ptr
+	*(volatile uint32_t*)&cs2[6] = 0x80000000 | TX_BUF_ADDR; // DMA Payload Ptr
 	cs2[8]  = 0x064A;                               // Config 1
-	cs2[11] = 0x0960;                               // Config 2 (Offset 0x16)
+	cs2[11] = 0x0960;                               // Config 2
 
-	// 3. Strict BLE Advertisement Payload (ADV_NONCONN_IND)
+	// Valid BLE Advertisement Payload (ADV_NONCONN_IND)
 	uint8_t adv_payload[] = {
-		0x11, 0x22, 0x33, 0x44, 0x55, 0x66, // AdvA (Address LSB first)
+		0x11, 0x22, 0x33, 0x44, 0x55, 0x66, // Address LSB first
 		0x02, 0x01, 0x06,                   // AD 1: Flags
-		0x05, 0x09, 'B', 'A', 'R', 'E'      // AD 2: Local Name
+		0x05, 0x09, 'B', 'A', 'R', 'E'      // AD 2: Name
 	};
 	uint8_t len = sizeof(adv_payload);
 	
-	// 4. Copy to the EM SRAM Buffer
-	volatile uint8_t *tx_buf = (volatile uint8_t *)EM_TX_PAYLOAD_BUF;
+	// Copy to EM SRAM
+	volatile uint8_t *tx_buf = (volatile uint8_t *)TX_BUF_ADDR;
 	for (int i = 0; i < len; i++) {
 		tx_buf[i] = adv_payload[i];
 	}
 
-	// 5. Write Aux Header (Type 0x02 = ADV_NONCONN_IND)
+	// Write Aux Header (Type 0x02 = ADV_NONCONN_IND)
 	*(volatile uint16_t*)(0x1124C) = (len << 8) | 0x02;
 
-	// 6. --- BUILD THE HARDWARE EVENT NODE ---
-	volatile uint32_t* hw_node = (volatile uint32_t*)EM_HW_LIST_NODE;
-	hw_node[0] = 0x00000000;    // Next Node (0 = End of List)
-	hw_node[1] = EM_CS2_BASE;   // Control Structure to Execute
-	
-	// Target Time: Native Clock (Down-counter) MINUS 2000 ticks (~2ms in the future)
-	// Masked to 28-bits as you discovered in Errata 7.2
-	hw_node[2] = (BB_CLK - 2000) & 0x0FFFFFFF; 
-	
-	// 7. Arm the Global Hardware Pointer!
-	BB_GLOBAL_PTR = EM_HW_LIST_NODE;
-
-	// 8. Enable MAC Global TX (Hardware will take over from here)
+	// Enable MAC Global TX
 	BB_CTRL |= (1 << 18);
 
-	// 9. CPU Polling Loop
-	uint32_t timeout = 5000000; // Large timeout to account for the 2ms hardware delay
+	// Fire! (Manual Type 3 Bypass)
+	// Because hardware_init() is active, the clock is ticking, and the hardware WILL transition.
+	uint32_t task_strt = BB_TASK_START;
+	task_strt &= ~(1 << 13);
+	task_strt |=  (1 << 13); // Test Mode bit
+	BB_TASK_START = task_strt;
+	
+	task_strt |= (1 << 12);  // Start Task Bit
+	BB_TASK_START = task_strt;
+
+	// Poll for TX Done (Bit 1 in BB_INT_STAT)
+	uint32_t timeout = 20000;
 	while (timeout--) {
 		if (BB_INT_STAT & 0x02) {
-			// SUCCESS! The MAC autonomous scheduler fired and finished the TX
-			break;
+			break; // Boom!
 		}
 	}
 
-	// 10. Cleanup
+	// Acknowledge and stop
 	BB_INT_CLR = 0xFFFFFFFF;
 	BB_CTRL &= ~(1 << 18);
 }
 
-void hunt_radio_interrupt(struct ush_object *self) {
+
+void hunt_radio_interrupt(uint32_t *result) {
 	// 1. Enable ALL interrupts in the PIC so they latch into PICPND
 	PICENSET = 0xFFFFFFFF; 
 	
@@ -245,13 +241,66 @@ void hunt_radio_interrupt(struct ush_object *self) {
 			uint32_t bb_status = BB_INT_STAT;
 			
 			// Print or log `current_pnd` and `bb_status` here.
-			ush_printf(self, "current_pnd:bb_status %lu:%lu", current_pnd, bb_status);
+			result[0] = current_pnd;
+			result[1] = bb_status;
 			
 			// Acknowledge the interrupt on the MAC side
 			BB_INT_CLR = bb_status;
 			break;
 		}
 	}
+}
+
+uint32_t poke_ceva_mac(uint32_t *result) {
+	// 1. Stop MAC and clear interrupts
+	BB_CTRL &= ~(1 << 18);
+	BB_INT_CLR = 0xFFFFFFFF; 
+	
+	// 2. Build the Control Structure (CS) for a simple RX listen
+	volatile uint16_t* cs = (volatile uint16_t*)(uintptr_t)EM_CS2_BASE;
+	cs[0]  = 0x001D;                          // State: 0x1D = RX Mode
+	cs[1]  = 0xBED6;                          // AA Lower (Dummy)
+	*(volatile uint32_t*)&cs[2] = 0x55558E89; // AA Upper + CRC
+	cs[4]  = 0x0055;                          // CRC Upper
+	cs[5]  = 37;                              // Channel
+	*(volatile uint32_t*)&cs[6] = 0;          // DMA Ptr (0 is fine for RX)
+	cs[8]  = 0x0000;                          // Config 1
+	cs[11] = 0x0000;                          // Config 2
+
+	// 3. Point the Hardware Global Pointer DIRECTLY to the CS!
+	// In bypass mode, it doesn't want an Event Node. It wants the CS.
+	BB_GLOBAL_PTR = EM_CS2_BASE;
+
+	// 4. Enable Global MAC TX/RX hardware
+	BB_CTRL |= (1 << 18);
+
+	// 5. Fire! Force Manual Execution Bypass
+	uint32_t task = BB_TASK_START;
+	task &= ~(1 << 13); // Clear Continuous Test Mode
+	task |=  (1 << 12); // Start Task!
+	BB_TASK_START = task;
+
+	// 6. Wait for a reaction
+	uint32_t caught_stat = 0;
+	uint32_t timeout = 500000; // ~500ms timeout
+	
+	while (--timeout) {
+		caught_stat = BB_INT_STAT;
+		if (caught_stat != 0) {
+			break; // WE GOT A REACTION!
+		}
+	}
+
+	// 7. Capture Error Code
+	uint32_t err = BB_ERR_CODE;
+
+	// 8. Cleanup
+	BB_INT_CLR = 0xFFFFFFFF;
+	BB_CTRL &= ~(1 << 18);
+
+	result[0] = caught_stat;
+	result[1] = err;
+	result[2] = timeout;
 }
 
 #endif // BLUETRUM_RADIO_H
