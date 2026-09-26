@@ -3,6 +3,7 @@
 #include "sfr.h"
 #include "inc/ush.h"
 #include "bluetrum_usb.h"
+#include "iSLER.h"
 
 /* ROM prototypes */
 typedef void (*rom_usb_bootloader)(void);
@@ -55,7 +56,7 @@ static void uart0_print_string(const char *str) {
  * The "interrupt" attribute is critical for RISC-V so the compiler 
  * generates an `mret` and saves all registers
  */
-#define VECTOR_SIZE 16
+#define VECTOR_SIZE 32
 static uint32_t isr_vector_counter[VECTOR_SIZE] = {0};
 __attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr0(void) { isr_vector_counter[0]++; }
 __attribute__((section(".isr"))) __attribute__((interrupt)) void default_isr1(void) { isr_vector_counter[1]++; }
@@ -98,6 +99,14 @@ void *isr_vector_table[VECTOR_SIZE];
 
 uint32_t isr_vector_counter_get(size_t index) {
 	return (index < VECTOR_SIZE) ? isr_vector_counter[index] : 0;
+}
+
+__attribute__((section(".isr"), interrupt))
+void bt_radio_isr(void) {
+	isr_vector_counter[1]++;
+	uint32_t bb_stat = BB_INT_STAT;
+	BB_INT_CLR = bb_stat;
+	PICCONCLR = (1 << 1);
 }
 
 /* called from USH_ASSERT on failure */
@@ -233,9 +242,13 @@ int main(void) {
 	ROM_UART0_INIT();
 
 	isr_vector_table[0] = (void *)default_isr0;
-	isr_vector_table[1] = (void *)default_isr1;
-	isr_vector_table[2] = (void *)default_isr2;
-	isr_vector_table[3] = (void *)default_isr3;
+#ifdef BLUETRUM_RADIO_H
+	isr_vector_table[1] = (void *)bt_radio_isr;
+#else
+	isr_vector_table[1] = (void *)default_isr1; // Bootrom: 0x00080E84;
+#endif
+	isr_vector_table[2] = (void *)default_isr2; // Bootrom: 0x00080E8C;
+	isr_vector_table[3] = (void *)default_isr3; // Bootrom: 0x00080E9A;
 	isr_vector_table[4] = (void *)default_isr4;
 	isr_vector_table[5] = (void *)default_isr5;
 	isr_vector_table[6] = (void *)default_isr6;
@@ -243,7 +256,7 @@ int main(void) {
 	isr_vector_table[8] = (void *)0x00084020, // 0x20: ISR8 XIP Cache NMI handler, don't change!
 	isr_vector_table[9] = (void *)default_isr9;
 	isr_vector_table[10] = (void *)default_isr10;
-	isr_vector_table[11] = (void *)default_isr11;
+	isr_vector_table[11] = (void *)default_isr11; // Bootrom: 0x00080EA2;
 	isr_vector_table[12] = (void *)default_isr12;
 	isr_vector_table[13] = (void *)default_isr13;
 	isr_vector_table[14] = (void *)default_isr14;

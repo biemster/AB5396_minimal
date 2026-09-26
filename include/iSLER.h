@@ -1,3 +1,6 @@
+#ifndef BLUETRUM_RADIO_H
+#define BLUETRUM_RADIO_H
+
 #include <stdint.h>
 #include <string.h>
 #include "sfr.h"
@@ -6,6 +9,8 @@
 #ifndef REG32
 #define REG32(addr)    (*(volatile uint32_t *)(uintptr_t)(addr))
 #endif
+
+#define BB_CLKCON      REG32(0x03A8)
 
 #define RF_SPI_CTRL    REG32(0x8070)
 #define RF_SPI_CFG     REG32(0x8074)
@@ -18,10 +23,10 @@
 #define BB_INT_STAT    BB_REG(0x010)
 #define BB_INT_EN      BB_REG(0x014)
 #define BB_INT_CLR     BB_REG(0x018)
-#define BB_NATIVE_CLK  BB_REG(0x020)
+#define BB_CLK         BB_REG(0x020)
 #define BB_MAC1        BB_REG(0x024)
 #define BB_MAC2        BB_REG(0x028)
-#define BB_DMA_PTR     BB_REG(0x02C)
+#define BB_GLOBAL_PTR  BB_REG(0x02C)
 #define BB_TASK_START  BB_REG(0x0E0)
 
 // --- EM and TX Buffers ---
@@ -41,10 +46,6 @@ struct ll_em_block {
 	uint32_t unused2;
 } __attribute__((packed));
 
-struct ble_tx_buffer {
-	uint16_t header;       // [15:8] Length, [7:0] PDU Type
-	uint8_t payload[37];
-} __attribute__((packed));
 
 // --- RF SPI primitives ---
 
@@ -148,39 +149,109 @@ void ble_baseband_init(void) {
 }
 
 // 2. Transmit a raw Link Layer packet
-void ble_send_raw_packet_dtm(uint8_t phys_channel, uint8_t pdu_type, const uint8_t *payload, uint8_t len) {
-	// 1. Auxiliary Header Registers
-	*(volatile uint16_t*)(0x1124C) = (len << 8) | (pdu_type & 0x0F);
+// EM Addresses
+#define EM_HW_LIST_NODE   0x10400
+#define EM_CS2_BASE       0x10EDC
+#define EM_TX_PAYLOAD_BUF 0x11000 
+
+void ble_send_adv_dtm(uint8_t phys_channel) {
+	// 1. Ensure MAC is stopped and clear any stale interrupts
+	BB_CTRL &= ~(1 << 18);
+	BB_INT_CLR = 0xFFFFFFFF; 
+
+	// 2. Setup CS2 (0x10EDC)
+	volatile uint16_t* cs2 = (volatile uint16_t*)EM_CS2_BASE;
+	cs2[0]  = 0x001C;                               // State
+	cs2[1]  = 0xBED6;                               // AA Lower
+	*(volatile uint32_t*)&cs2[2] = 0x55558E89;      // AA Upper | CRC Lower
+	cs2[4]  = 0x0055;                               // CRC Upper
+	cs2[5]  = phys_channel;                         // Channel (37, 38, or 39)
+	*(volatile uint32_t*)&cs2[6] = 0x80000000 | EM_TX_PAYLOAD_BUF; // DMA Payload Ptr
+	cs2[8]  = 0x064A;                               // Config 1
+	cs2[11] = 0x0960;                               // Config 2 (Offset 0x16)
+
+	// 3. Strict BLE Advertisement Payload (ADV_NONCONN_IND)
+	uint8_t adv_payload[] = {
+		0x11, 0x22, 0x33, 0x44, 0x55, 0x66, // AdvA (Address LSB first)
+		0x02, 0x01, 0x06,                   // AD 1: Flags
+		0x05, 0x09, 'B', 'A', 'R', 'E'      // AD 2: Local Name
+	};
+	uint8_t len = sizeof(adv_payload);
 	
-	// 2. Exact EM Block configuration for CS2 (0x10EDC)
-	volatile uint8_t* cs2 = (volatile uint8_t*)0x10EDC;
-	*(volatile uint16_t*)(cs2 + 0x00) = 0x001C;
-	*(volatile uint16_t*)(cs2 + 0x02) = 0xBED6;       // AA Lower
-	*(volatile uint32_t*)(cs2 + 0x04) = 0x55558E89;   // AA Upper | CRC Lower
-	*(volatile uint16_t*)(cs2 + 0x08) = 0x0055;       // CRC Upper
-	*(volatile uint16_t*)(cs2 + 0x0A) = phys_channel; 
-	*(volatile uint32_t*)(cs2 + 0x0C) = 0x80000000 | TX_BUF_ADDR; 
-	*(volatile uint16_t*)(cs2 + 0x10) = 0x064A; 
-	*(volatile uint16_t*)(cs2 + 0x16) = 0x0960;
+	// 4. Copy to the EM SRAM Buffer
+	volatile uint8_t *tx_buf = (volatile uint8_t *)EM_TX_PAYLOAD_BUF;
+	for (int i = 0; i < len; i++) {
+		tx_buf[i] = adv_payload[i];
+	}
+
+	// 5. Write Aux Header (Type 0x02 = ADV_NONCONN_IND)
+	*(volatile uint16_t*)(0x1124C) = (len << 8) | 0x02;
+
+	// 6. --- BUILD THE HARDWARE EVENT NODE ---
+	volatile uint32_t* hw_node = (volatile uint32_t*)EM_HW_LIST_NODE;
+	hw_node[0] = 0x00000000;    // Next Node (0 = End of List)
+	hw_node[1] = EM_CS2_BASE;   // Control Structure to Execute
 	
-	// 3. Write payload (ensure 32-bit alignment if required by DMA)
-	memcpy((void*)TX_BUF_ADDR, payload, len);
+	// Target Time: Native Clock (Down-counter) MINUS 2000 ticks (~2ms in the future)
+	// Masked to 28-bits as you discovered in Errata 7.2
+	hw_node[2] = (BB_CLK - 2000) & 0x0FFFFFFF; 
+	
+	// 7. Arm the Global Hardware Pointer!
+	BB_GLOBAL_PTR = EM_HW_LIST_NODE;
 
-	// DO NOT OVERWRITE BB_DMA_PTR (0xF02C) HERE!
+	// 8. Enable MAC Global TX (Hardware will take over from here)
+	BB_CTRL |= (1 << 18);
 
-	// 4. Enable Global TX
-	BB_CTRL |= 0x40000; 
+	// 9. CPU Polling Loop
+	uint32_t timeout = 5000000; // Large timeout to account for the 2ms hardware delay
+	while (timeout--) {
+		if (BB_INT_STAT & 0x02) {
+			// SUCCESS! The MAC autonomous scheduler fired and finished the TX
+			break;
+		}
+	}
 
-	// 5. Fire Transmitter: Set Bit 12, Clear Bit 13
-	uint32_t task_strt = BB_REG(0x0E0);
-	task_strt &= ~(1 << 13);
-	task_strt |= (1 << 12);
-	BB_REG(0x0E0) = task_strt;
-
-	// 6. Manual cycle-delay abort (since DTM loops infinitely)
-	for(volatile uint32_t i = 0; i < 50000; i++); 
-
-	// 7. Abort and Clear
-	BB_CTRL &= ~0x40000;
-	BB_INT_CLR = 0xFF; // Clear all pending to be safe
+	// 10. Cleanup
+	BB_INT_CLR = 0xFFFFFFFF;
+	BB_CTRL &= ~(1 << 18);
 }
+
+void hunt_radio_interrupt(struct ush_object *self) {
+	// 1. Enable ALL interrupts in the PIC so they latch into PICPND
+	PICENSET = 0xFFFFFFFF; 
+	
+	// 2. Clear any old baseband states
+	BB_INT_CLR = 0xFFFFFFFF;
+	
+	// 3. Record baseline noise (e.g., standard timers that might be ticking)
+	uint32_t baseline_pnd = PICPND;
+
+	// 4. Trigger the packet transmission
+	rf_init();
+	ble_baseband_init();
+	ble_send_adv_dtm(37);
+	
+	// 5. Poll for the hardware line to go high
+	uint32_t timeout = 500000;
+	while (timeout--) {
+		uint32_t current_pnd = PICPND;
+		
+		// Mask out the baseline noise (UART, SysTick, etc.)
+		current_pnd &= ~(baseline_pnd);
+		
+		if (current_pnd != 0) {
+			// WE CAUGHT IT!
+			// If current_pnd == 0x00000800, then the Radio IRQ is Bit 11.
+			uint32_t bb_status = BB_INT_STAT;
+			
+			// Print or log `current_pnd` and `bb_status` here.
+			ush_printf(self, "current_pnd:bb_status %lu:%lu", current_pnd, bb_status);
+			
+			// Acknowledge the interrupt on the MAC side
+			BB_INT_CLR = bb_status;
+			break;
+		}
+	}
+}
+
+#endif // BLUETRUM_RADIO_H

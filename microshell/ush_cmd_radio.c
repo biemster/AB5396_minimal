@@ -27,7 +27,16 @@ SOFTWARE.
 #include <string.h>
 #include "inc/ush.h"
 #include "inc/ush_internal.h"
-#include "iSLER.h"
+
+// stuff from iSLER.h that is already included in main.c
+extern void rf_init(void);
+extern int rf_reg_rd(uint8_t reg_addr, uint32_t *value);
+extern void bb_clk_init(void);
+extern void ble_baseband_init(void);
+extern void ble_send_adv_dtm(uint8_t phys_channel);
+extern void hunt_radio_interrupt(struct ush_object *self);
+#define BB_CLK 0xf020
+
 
 typedef enum {
 	RADIO_DUMPREGS,
@@ -53,6 +62,10 @@ void radio_ctrl_callback(struct ush_object *self, struct ush_file_descriptor con
 		self->process_index = RADIO_DUMPREGS;
 		self->process_index_item = 0;
 		ush_process_start(self, file);
+	}
+	else if (strcmp(argv[1], "--isrfind") == 0) {
+		hunt_radio_interrupt(self);
+		ush_print(self, "done.");
 	}
 	else if (strcmp(argv[1], "--init") == 0) {
 		rf_init();
@@ -132,9 +145,9 @@ void radio_ctrl_service(struct ush_object *self, struct ush_file_descriptor cons
 		}
 		else if(self->process_index == RADIO_BB_CLOCK) {
 			if (self->process_index_item <= 0xFF) {
-				uint32_t clk1 = BB_NATIVE_CLK & 0x00FFFFFF;
+				uint32_t clk1 = BB_CLK & 0x00FFFFFF;
 				for(volatile int d = 0; d < 100; d++);
-				uint32_t clk2 = BB_NATIVE_CLK & 0x00FFFFFF;
+				uint32_t clk2 = BB_CLK & 0x00FFFFFF;
 
 				(void)snprintf(
 					output,
@@ -152,12 +165,9 @@ void radio_ctrl_service(struct ush_object *self, struct ush_file_descriptor cons
 		}
 		else if(self->process_index == RADIO_ADVERTISE) {
 			if(self->process_index_item > 0) {
-				const uint8_t adv_payload[] = {
-						0x11, 0x22, 0x33, 0x44, 0x55, 0x66, // MAC
-						0x08, 0x09, 'A', 'B', '5', '3', '9', '6', '!'}; // 0x09: "Complete Local Name"
-				ble_send_raw_packet_dtm(37, 0x02, adv_payload, sizeof(adv_payload));
-				ble_send_raw_packet_dtm(38, 0x02, adv_payload, sizeof(adv_payload));
-				ble_send_raw_packet_dtm(39, 0x02, adv_payload, sizeof(adv_payload));
+				ble_send_adv_dtm(37);
+				ble_send_adv_dtm(38);
+				ble_send_adv_dtm(39);
 
 				self->process_index_item--;
 				ush_write_pointer(self, ".", USH_STATE_PROCESS_SERVICE);
