@@ -63,6 +63,7 @@ MICRO_SRCS := $(MICROSHELL_DIR)/src/src/ush.c \
 			$(MICROSHELL_DIR)/src/src/commands/ush_cmd_xxd.c \
 			$(MICROSHELL_DIR)/src/src/commands/ush_cmd_echo.c \
 			microshell/ush_cmd_radio.c \
+			microshell/ush_cmd_timers.c \
 			microshell/ush_cmd_isrcounts.c
 
 MICRO_OBJS := $(MICRO_SRCS:.c=.o)

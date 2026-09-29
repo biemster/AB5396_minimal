@@ -1,6 +1,8 @@
 #ifndef _SFR_H
 #define _SFR_H
 
+#define BIT(n)   (1UL << (n))
+
 #ifndef __ASSEMBLER__
 #define SFR_RO *(volatile unsigned long const *)
 #define SFR_WO *(volatile unsigned long*)

@@ -52,8 +52,7 @@ python ../bluetrum-tools/download.py --port /dev/ttyACM0 --baud 115200 write 0x1
 - [x] USB stack (with CDC ACM)
 - [ ] RF stack
 - [ ] Sleep mode
-- [ ] SysTick
-- [ ] Timers
+- [x] Timers
 - [ ] GPIO
 - [ ] ADC
 - [ ] I2C

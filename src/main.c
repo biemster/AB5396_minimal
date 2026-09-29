@@ -3,7 +3,8 @@
 #include "sfr.h"
 #include "inc/ush.h"
 #include "bluetrum_usb.h"
-#include "iSLER.h"
+#include "bluetrum_timers.h"
+#include "bluetrum_iSLER.h"
 
 /* ROM prototypes */
 typedef void (*rom_usb_bootloader)(void);
@@ -101,14 +102,6 @@ uint32_t isr_vector_counter_get(size_t index) {
 	return (index < VECTOR_SIZE) ? isr_vector_counter[index] : 0;
 }
 
-__attribute__((section(".isr"), interrupt))
-void bt_radio_isr(void) {
-	isr_vector_counter[1]++;
-	uint32_t bb_stat = BB_INT_STAT;
-	BB_INT_CLR = bb_stat;
-	PICCONCLR = (1 << 1);
-}
-
 /* called from USH_ASSERT on failure */
 void ush_assert_failed(const char *file, int line) {
 	/* simple visible marker */
@@ -201,6 +194,19 @@ static const struct ush_descriptor ush_desc = {
 	.hostname = g_hostname,
 };
 
+// "timers" command
+extern void timers_callback(struct ush_object *self, struct ush_file_descriptor const *file, int argc, char *argv[]);
+static const struct ush_file_descriptor g_timers_cmd_files[] = {
+	{
+		.name = "timers",
+		.description = "Init or get TMR0 counts",
+		.help = "usage: timers\r\n"
+				"       timers --init <idx>\r\n"
+				"       timers --reset <idx>\r\n",
+		.exec = timers_callback,
+	},
+};
+
 // "isr_counts" command
 extern void isr_counts_callback(struct ush_object *self, struct ush_file_descriptor const *file, int argc, char *argv[]);
 extern void isr_counts_service(struct ush_object *self, struct ush_file_descriptor const *file);
@@ -220,10 +226,10 @@ extern void radio_ctrl_service(struct ush_object *self, struct ush_file_descript
 static const struct ush_file_descriptor g_radio_cmd_files[] = {
 	{
 		.name = "radio_ctrl",
-		.description = "dump Bluetrum RF registers",
+		.description = "Bluetrum RF radio control",
 		.help = "usage: radio_ctrl\r\n"
 				"       radio_ctrl --init\r\n"
-				"       radio_ctrl --adv [nadv]\r\n"
+				"       radio_ctrl --dtm\r\n"
 				"       radio_ctrl --clk\r\n"
 				"       radio_ctrl --dumpregs\r\n",
 		.exec = radio_ctrl_callback,
@@ -234,6 +240,7 @@ static const struct ush_file_descriptor g_radio_cmd_files[] = {
 static struct ush_object g_ush;
 static struct ush_node_object g_root;
 static struct ush_node_object g_radio_cmd_node;
+static struct ush_node_object g_timers_cmd_node;
 static struct ush_node_object g_isr_counts_cmd_node;
 
 int main(void) {
@@ -242,14 +249,14 @@ int main(void) {
 	ROM_UART0_INIT();
 
 	isr_vector_table[0] = (void *)default_isr0;
-#ifdef BLUETRUM_RADIO_H
-	isr_vector_table[1] = (void *)bt_radio_isr;
-#else
 	isr_vector_table[1] = (void *)default_isr1; // Bootrom: 0x00080E84;
-#endif
 	isr_vector_table[2] = (void *)default_isr2; // Bootrom: 0x00080E8C;
 	isr_vector_table[3] = (void *)default_isr3; // Bootrom: 0x00080E9A;
+#ifdef BLUETRUM_TIMERS_H
+	isr_vector_table[4] = (void *)TMR1_isr;
+#else
 	isr_vector_table[4] = (void *)default_isr4;
+#endif
 	isr_vector_table[5] = (void *)default_isr5;
 	isr_vector_table[6] = (void *)default_isr6;
 	isr_vector_table[7] = (void *)default_isr7;
@@ -301,6 +308,7 @@ int main(void) {
 	memset(&g_ush, 0, sizeof(g_ush));
 	ush_init(&g_ush, &ush_desc);
 	ush_commands_add( &g_ush, &g_radio_cmd_node, g_radio_cmd_files, (sizeof(g_radio_cmd_files) / sizeof(g_radio_cmd_files[0])) );
+	ush_commands_add( &g_ush, &g_timers_cmd_node, g_timers_cmd_files, (sizeof(g_timers_cmd_files) / sizeof(g_timers_cmd_files[0])) );
 	ush_commands_add( &g_ush, &g_isr_counts_cmd_node, g_isr_counts_cmd_files, (sizeof(g_isr_counts_cmd_files) / sizeof(g_isr_counts_cmd_files[0])) );
 
 	/* mount root node (empty root for now) */
