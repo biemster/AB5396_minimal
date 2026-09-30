@@ -89,11 +89,11 @@ LUCK.bin: boot.bin src/boot.c
 # --- STAGE 2 (MAIN XIP APP) ---
 # Compile microshell objects (only once if up-to-date)
 $(MICRO_OBJS): %.o: %.c
-	@echo "CC $<"
-	$(CC) $(CFLAGS) -c $< -o $@
+	@printf "\r\033[KCC $<"
+	@$(CC) $(CFLAGS) -c $< -o $@
 
 main.elf: linker/main.ld startup/startup_main.S src/main.c $(MICRO_OBJS)
-	@echo -e "\n*** COMPILING MAIN APPLICATION ***"
+	@echo -e "\n\n*** COMPILING MAIN APPLICATION ***"
 	$(CC) $(CFLAGS) -T $^ $(LDFLAGS) -o $@
 
 main.bin: main.elf
