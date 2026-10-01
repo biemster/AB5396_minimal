@@ -115,9 +115,11 @@ static void dump_system_state(const char *label) {
 // Tests: bluetrum a5, a5, a2 (funct7=0x61, funct3=4) -> Suspected BIT SET
 uint32_t test_bluetrum_op_4(uint32_t val, uint32_t bit_idx) {
 	uint32_t res;
+	register uint32_t rs2_reg asm("t0") = bit_idx; // t0 is x5, set bit 5 irrespective of bit_idx value
+
 	__asm__ volatile (
 		".insn r 0x33, 4, 0x61, %0, %1, %2"
-		: "=r" (res) : "r" (val), "r" (bit_idx)
+		: "=r" (res) : "r" (val), "r" (rs2_reg)
 	);
 	return res;
 }
@@ -125,9 +127,11 @@ uint32_t test_bluetrum_op_4(uint32_t val, uint32_t bit_idx) {
 // Tests: bluetrum a5, a5, a2 (funct7=0x61, funct3=3) -> Suspected BIT CLEAR
 uint32_t test_bluetrum_op_3(uint32_t val, uint32_t bit_idx) {
 	uint32_t res;
+	register uint32_t rs2_reg asm("t1") = bit_idx; // t1 is x6, clear bit 6 irrespective of bit_idx value
+
 	__asm__ volatile (
 		".insn r 0x33, 3, 0x61, %0, %1, %2"
-		: "=r" (res) : "r" (val), "r" (bit_idx)
+		: "=r" (res) : "r" (val), "r" (rs2_reg)
 	);
 	return res;
 }
@@ -336,12 +340,12 @@ int entry(void *ctx)
 
 	// If this prints 0x00000020, it is a Bit Set!
 	print_string("OP 4 (Set): ");
-	print_hex32( test_bluetrum_op_4(0x00000000, 5) );
+	print_hex32( test_bluetrum_op_4(0x00000000, 2) );
 	print_string("\r\n");
 
-	// If this prints 0xFFFFFFDF, it is a Bit Clear!
+	// If this prints 0xFFFFFFBF, it is a Bit Clear!
 	print_string("OP 3 (Clr): ");
-	print_hex32( test_bluetrum_op_3(0xFFFFFFFF, 5) );
+	print_hex32( test_bluetrum_op_3(0xFFFFFFFF, 2) );
 	print_string("\r\n");
 #endif
 
