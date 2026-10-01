@@ -1,6 +1,7 @@
 TARGET = main
 XIP_JUMP ?= 0
 XIP_PAGING_TEST ?= 0
+XIP_DUMPER ?= 0
 
 TOOLCHAIN = riscv64-elf
 CC = $(TOOLCHAIN)-gcc
