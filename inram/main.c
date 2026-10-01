@@ -19,7 +19,7 @@
 #define XIP_PAGING_TEST 0
 #endif
 
-#define ISR7_CALLBACK   (*(volatile uint32_t *)(uintptr_t)0x00010044)
+#define ISR8_CALLBACK   (*(volatile uint32_t *)(uintptr_t)0x00010044)
 
 /*
  * --------------------------------------------------------------------------
@@ -162,7 +162,7 @@ int entry(void *ctx)
 	ROM_SYSTEM_INIT();
 	ROM_UART0_INIT();
 
-	ISR7_CALLBACK = (uint32_t)(uintptr_t)&xip_callback;
+	ISR8_CALLBACK = (uint32_t)(uintptr_t)&xip_callback;
 
 	/* Configure XIP Window & Reset Cache State */
 	XIP_CMD   = 0x00000342;
