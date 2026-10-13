@@ -12,14 +12,14 @@ MINICHLINK = $(HOME)/temp/ch32fun/minichlink/minichlink
 
 ARCH_FLAGS = -march=rv32imc_zicsr -mabi=ilp32
 CFLAGS = $(ARCH_FLAGS) -fPIC -Wall
-LDFLAGS = $(ARCH_FLAGS) -mno-relax -nostdlib -T ram.ld -Wl,-Map,$(TARGET).map
+LDFLAGS = $(ARCH_FLAGS) -mno-relax -nostdlib -T ram.ld -Wl,--no-warn-rwx-segments -Wl,-Map,$(TARGET).map
 
 SRCS  = $(TARGET).c
 SRCS += startup.s
 
 LOCAL_OBJS = $(SRCS:.c=.o)
 LOCAL_OBJS := $(LOCAL_OBJS:.s=.o)
-PRECOMPILED_OBJS = $(wildcard libs/*.o)
+# PRECOMPILED_OBJS = $(wildcard lib/*.o)
 OBJS = $(LOCAL_OBJS) $(PRECOMPILED_OBJS)
 
 .PHONY: all clean
@@ -41,7 +41,7 @@ $(TARGET).lst: $(TARGET).elf
 		--wide "$<" > "$@"
 
 %.o: %.c
-	$(CC) $(CFLAGS) -DXIP_JUMP=$(XIP_JUMP) -DXIP_PAGING_TEST=$(XIP_PAGING_TEST) -c $< -o $@
+	$(CC) $(CFLAGS) -DXIP_JUMP=$(XIP_JUMP) -DXIP_PAGING_TEST=$(XIP_PAGING_TEST) -DXIP_DUMPER=$(XIP_DUMPER) -c $< -o $@
 
 %.o: %.s
 	$(CC) $(CFLAGS) -c $< -o $@

@@ -1,12 +1,6 @@
 #include <stdint.h>
 #include "sfr.h"
 
-/*
- * ============================================================================
- * AB5396B - CUSTOM OPEN-SOURCE XIP STAGE-1 DRIVER
- * ============================================================================
- */
-
 /* 
  * The physical SPI flash offset that CPU address 0x10000000 maps to.
  * 0x2000 skips the boot headers
@@ -108,7 +102,7 @@ static void dump_system_state(const char *label) {
 
 	/* Misc */
 	print_string("EFCON0:  "); print_hex32(EFCON0); print_newline();
-	print_string("ISR7_CB: "); print_hex32(REG32(0x00010044)); print_newline();
+	print_string("ISR8_CB: "); print_hex32(REG32(0x00010044)); print_newline();
 	print_string("----------------------\r\n\r\n");
 }
 
@@ -146,7 +140,7 @@ static uint32_t xip_callback(void)
 {
 	uint32_t fault_addr = ICADRMS;
 	
-	/* 1. LIVE TRACE: Print the exact address that missed! */
+	/* LIVE TRACE */
 	ROM_UART0_PUTCHAR('[');
 	print_hex32(fault_addr);
 	ROM_UART0_PUTCHAR(']');
