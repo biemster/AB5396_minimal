@@ -16,8 +16,6 @@
 #define XIP_DUMPER 0
 #endif
 
-#define ISR8_CALLBACK   (*(volatile uint32_t *)(uintptr_t)0x00010044)
-
 /*
  * --------------------------------------------------------------------------
  * ROM Functions
@@ -34,13 +32,6 @@ typedef void (*rom_delay)(uint32_t cycles);
 
 typedef void (*rom_system_init)(void);
 #define ROM_SYSTEM_INIT ((rom_system_init)0x00084000)
-
-/* We call the vendor's low-level DMA primitive directly */
-typedef uint32_t (*rom_dma_t)(
-	uintptr_t dest_ram, uintptr_t flash_offset, uint32_t size, 
-	uint32_t lfsr_cfg, uint32_t lfsr_en
-);
-#define VENDOR_DMA ((rom_dma_t)0x0008964c)
 
 /*
  * --------------------------------------------------------------------------
@@ -102,7 +93,6 @@ static void dump_system_state(const char *label) {
 
 	/* Misc */
 	print_string("EFCON0:  "); print_hex32(EFCON0); print_newline();
-	print_string("ISR8_CB: "); print_hex32(REG32(0x00010044)); print_newline();
 	print_string("----------------------\r\n\r\n");
 }
 
@@ -130,14 +120,53 @@ uint32_t test_bluetrum_op_3(uint32_t val, uint32_t bit_idx) {
 	return res;
 }
 
-/*
- * --------------------------------------------------------------------------
- * CUSTOM CACHE FILLER
- * --------------------------------------------------------------------------
- */
-__attribute__((noinline))
-static uint32_t xip_callback(void)
-{
+static inline __attribute__((always_inline)) 
+void spi_read_raw(uint32_t dest_ram, uint32_t flash_offset, uint32_t size) {
+	/* Local stack array for DMA command (Thread & ISR safe) */
+	uint8_t spi_cmd_buf[4] __attribute__((aligned(4)));
+
+	/* A. Assert Chip Select (Low) */
+	if ((FUNCMCON0 & 0xF0) == 0x10) {
+		GPIOGCLR = 4;
+	} else {
+		GPIOECLR = 2;
+	}
+
+	/* B. Prepare the SPI command (0x03 = Standard Read) */
+	spi_cmd_buf[0] = 0x03; 
+	spi_cmd_buf[1] = (uint8_t)(flash_offset >> 16);
+	spi_cmd_buf[2] = (uint8_t)(flash_offset >> 8);
+	spi_cmd_buf[3] = (uint8_t)(flash_offset);
+
+	/* C. DMA 1: Send Command + Address to Flash */
+	SPI0CON &= ~0x10;
+	SPI0DMAADR = (uint32_t)spi_cmd_buf;
+	SPI0DMACNT = 4; /* 1 byte cmd + 3 bytes address */
+	while ((SPI0CON & (1 << 16)) == 0); /* Wait for Transfer Complete */
+	
+	/* D. DMA 2: Stream Data Payload directly to Cache SRAM */
+	SPI0CON |= 0x310;
+	SPI0DMAADR = dest_ram;
+	SPI0DMACNT = size;
+	while ((SPI0CON & (1 << 16)) == 0); /* Wait for Transfer Complete */
+
+	/* E. Cleanup SPI / DMA State */
+	SPI0CON &= ~0x300;
+
+	/* F. Release Chip Select (High) */
+	if ((FUNCMCON0 & 0xF0) == 0x10) {
+		GPIOGSET = 4;
+	} else {
+		GPIOESET = 2;
+	}
+}
+
+__attribute__((interrupt))
+void xip_isr(void) {
+	/* Hardware Cache Exception Acknowledge (Tells Arbiter we are handling it) */
+	CACHCON1 = 0x20002;
+
+	/* Calculate Page Geometry */
 	uint32_t fault_addr = ICADRMS;
 	
 	/* LIVE TRACE */
@@ -146,28 +175,26 @@ static uint32_t xip_callback(void)
 	ROM_UART0_PUTCHAR(']');
 	ROM_UART0_PUTCHAR(' ');
 
-	/* 2. Calculate Page Geometry */
+	/* Calculate Page Geometry */
 	uint32_t aligned_addr = fault_addr & ~0x1FF;
 	uint32_t flash_offset = (aligned_addr & 0x00ffffff) + XIP_FLASH_OFFSET;
 	uint32_t page_num = aligned_addr >> 9;
 	uint32_t index = page_num & 0x3F; /* Standard Direct-Mapped */
 	uint32_t dest_ram = 0x00060000 + (index * 0x200);
 
-	/* Unlock SRAM */
-	ICINDEX = index;
-	CACHCON1 = 0x10;
-	ICTAG = 0;
-	CACHCON1 = 0x04;
-
 	/* Raw DMA Read (Unscrambled) */
-	VENDOR_DMA((uintptr_t)dest_ram, (uintptr_t)flash_offset, 0x200, 0, 0);
+	spi_read_raw(dest_ram, flash_offset, 0x200);
 
-	/* Lock SRAM & Set Valid Bit */
+	/* Lock SRAM & Commit Valid Tag */
 	ICINDEX = index;
 	ICTAG = page_num | 0x10000;
 	CACHCON1 = 0x24;
-
-	return 0;
+	
+	/* Proprietary Hardware Exception Return 
+	 * Clears the PIC pending state and restores the interrupt context */
+	uint32_t piccon = PICCON;
+	PICCON = piccon & 0xFFFFFFFE;
+	EPICCON = piccon;
 }
 
 /*
@@ -183,7 +210,15 @@ int entry(void *ctx)
 	ROM_SYSTEM_INIT();
 	ROM_UART0_INIT();
 
-	ISR8_CALLBACK = (uint32_t)(uintptr_t)&xip_callback;
+	/* Copy the BootROM exception vectors to RAM */
+	int VECTOR_SIZE = 32;
+	__attribute__((aligned(256))) void *isr_vector_table[VECTOR_SIZE];
+	uint32_t *rom_vectors = (uint32_t *)PICADR;
+	for (int i = 0; i < VECTOR_SIZE; i++) {
+		isr_vector_table[i] = (void *)rom_vectors[i];
+	}	
+	isr_vector_table[8] = (void *)xip_isr;
+	PICADR = (uint32_t)(uintptr_t)isr_vector_table;
 
 	/* Configure XIP Window & Reset Cache State */
 	XIP_CMD   = 0x00000342;
@@ -235,26 +270,25 @@ int entry(void *ctx)
 	volatile uint8_t *xip = (volatile uint8_t *)0x10000000;
 
 	/* 1. Fetch Ground Truth: Page 0, Page 1, and Page 64 (Eviction Target) */
-	VENDOR_DMA((uintptr_t)ground_truth, XIP_FLASH_OFFSET, 1024, 0, 0); /* Pages 0 and 1 */
-	VENDOR_DMA((uintptr_t)ground_truth + 1024, XIP_FLASH_OFFSET + 0x8000, 512, 0, 0); /* Page 64 */
-
-	int errors = 0;
+	spi_read_raw((uintptr_t)ground_truth, XIP_FLASH_OFFSET, 1024); /* Pages 0 and 1 */
+	spi_read_raw((uintptr_t)ground_truth + 1024, XIP_FLASH_OFFSET + 0x8000, 512); /* Page 64 */
 
 	/* TEST 1: Unaligned Miss */
+	int errors1 = 0;
 	print_string("[TEST 1] Unaligned Cache Miss... ");
 	uint8_t dummy = xip[0x234]; /* Trigger unaligned fault on Page 1 */
 	for(int i = 0x200; i < 0x240; i++) {
-		if (xip[i] != ground_truth[i]) errors++;
+		if (xip[i] != ground_truth[i]) errors1++;
 	}
-	if (errors) print_string("FAIL!\r\n"); else print_string("PASS\r\n");
+	if (errors1) print_string("FAIL!\r\n"); else print_string("PASS\r\n");
 
 	/* TEST 2: Boundary Cross */
-	errors = 0;
+	int errors2 = 0;
 	print_string("[TEST 2] Boundary Cross (0x1F8 to 0x207)... ");
 	for(int i = 0x1F8; i < 0x208; i++) {
-		if (xip[i] != ground_truth[i]) errors++;
+		if (xip[i] != ground_truth[i]) errors2++;
 	}
-	if (errors) print_string("FAIL!\r\n"); else print_string("PASS\r\n");
+	if (errors2) print_string("FAIL!\r\n"); else print_string("PASS\r\n");
 
 	/* TEST 2.5: Uncached Boundary Cross */
 	print_string("[TEST 2.5] Uncached Boundary Cross (0x3F8 to 0x407)... ");
@@ -270,23 +304,23 @@ int entry(void *ctx)
 	print_string("DONE\r\n");
 
 	/* TEST 3: Eviction & Tag Check */
-	errors = 0;
+	int errors3 = 0;
 	print_string("[TEST 3] Cache Eviction (Index Aliasing)... ");
 	dummy = xip[0x0000]; /* Load Page 0 to Slot 0 */
 	dummy = xip[0x8000]; /* Load Page 64 to Slot 0 (Evicts Page 0) */
 
 	/* Verify Page 64 */
 	for(int i = 0; i < 16; i++) {
-		if (xip[0x8000 + i] != ground_truth[1024 + i]) errors++;
+		if (xip[0x8000 + i] != ground_truth[1024 + i]) errors3++;
 	}
 
 	/* Re-fetch Page 0 */
 	for(int i = 0; i < 16; i++) {
-		if (xip[i] != ground_truth[i]) errors++;
+		if (xip[i] != ground_truth[i]) errors3++;
 	}
-	if (errors) print_string("FAIL!\r\n"); else print_string("PASS\r\n");
+	if (errors3) print_string("FAIL!\r\n"); else print_string("PASS\r\n");
 
-	if (errors == 0) {
+	if (!errors1 && !errors2 & !errors3) {
 		print_string("\r\nALL XIP HARDWARE TESTS PASSED!\r\n");
 	}
 #elif XIP_DUMPER

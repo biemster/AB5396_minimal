@@ -53,6 +53,47 @@ static void uart0_print_string(const char *str) {
 	}
 }
 
+static inline __attribute__((always_inline)) 
+void spi_read_raw(uint32_t dest_ram, uint32_t flash_offset, uint32_t size) {
+	/* Local stack array for DMA command (Thread & ISR safe) */
+	uint8_t spi_cmd_buf[4] __attribute__((aligned(4)));
+
+	/* A. Assert Chip Select (Low) */
+	if ((FUNCMCON0 & 0xF0) == 0x10) {
+		GPIOGCLR = 4;
+	} else {
+		GPIOECLR = 2;
+	}
+
+	/* B. Prepare the SPI command (0x03 = Standard Read) */
+	spi_cmd_buf[0] = 0x03; 
+	spi_cmd_buf[1] = (uint8_t)(flash_offset >> 16);
+	spi_cmd_buf[2] = (uint8_t)(flash_offset >> 8);
+	spi_cmd_buf[3] = (uint8_t)(flash_offset);
+
+	/* C. DMA 1: Send Command + Address to Flash */
+	SPI0CON &= ~0x10;
+	SPI0DMAADR = (uint32_t)spi_cmd_buf;
+	SPI0DMACNT = 4; /* 1 byte cmd + 3 bytes address */
+	while ((SPI0CON & (1 << 16)) == 0); /* Wait for Transfer Complete */
+	
+	/* D. DMA 2: Stream Data Payload directly to Cache SRAM */
+	SPI0CON |= 0x310;
+	SPI0DMAADR = dest_ram;
+	SPI0DMACNT = size;
+	while ((SPI0CON & (1 << 16)) == 0); /* Wait for Transfer Complete */
+
+	/* E. Cleanup SPI / DMA State */
+	SPI0CON &= ~0x300;
+
+	/* F. Release Chip Select (High) */
+	if ((FUNCMCON0 & 0xF0) == 0x10) {
+		GPIOGSET = 4;
+	} else {
+		GPIOESET = 2;
+	}
+}
+
 /* 
  * The "interrupt" attribute is critical for RISC-V so the compiler 
  * generates an `mret` and saves all registers
@@ -101,6 +142,37 @@ void *isr_vector_table[VECTOR_SIZE];
 uint32_t isr_vector_counter_get(size_t index) {
 	return (index < VECTOR_SIZE) ? isr_vector_counter[index] : 0;
 }
+
+__attribute__((section(".isr")))
+__attribute__((interrupt))
+void xip_isr(void) {
+	isr_vector_counter[8]++;
+	/* 1. Hardware Cache Exception Acknowledge (Tells Arbiter we are handling it) */
+	CACHCON1 = 0x20002;
+
+	/* 2. Calculate Page Geometry */
+	uint32_t fault_addr = ICADRMS;
+	uint32_t aligned_addr = fault_addr & ~0x1FF;
+	uint32_t flash_offset = (aligned_addr & 0x00ffffff) + MAIN_FLASH_OFFSET;
+	uint32_t page_num = aligned_addr >> 9;
+	uint32_t index = page_num & 0x3F; /* Standard Direct-Mapped */
+	uint32_t dest_ram = 0x00060000 + (index * 0x200);
+
+	/* Raw DMA Read (Unscrambled) */
+	spi_read_raw(dest_ram, flash_offset, 0x200);
+
+	/* 3. Commit Valid Tag */
+	ICINDEX = index;
+	ICTAG = page_num | 0x10000;
+	CACHCON1 = 0x24;
+	
+	/* 4. Proprietary Hardware Exception Return 
+	 * Clears the PIC pending state and restores the interrupt context */
+	uint32_t piccon = PICCON;
+	PICCON = piccon & 0xFFFFFFFE;
+	EPICCON = piccon;
+}
+
 
 /* called from USH_ASSERT on failure */
 void ush_assert_failed(const char *file, int line) {
@@ -260,7 +332,7 @@ int main(void) {
 	isr_vector_table[5] = (void *)default_isr5;
 	isr_vector_table[6] = (void *)default_isr6;
 	isr_vector_table[7] = (void *)default_isr7;
-	isr_vector_table[8] = (void *)0x00084020, // 0x20: ISR8 XIP Cache NMI handler, don't change!
+	isr_vector_table[8] = (void *)xip_isr;
 	isr_vector_table[9] = (void *)default_isr9;
 	isr_vector_table[10] = (void *)default_isr10;
 	isr_vector_table[11] = (void *)default_isr11; // Bootrom: 0x00080EA2;

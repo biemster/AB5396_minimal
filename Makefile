@@ -94,7 +94,7 @@ $(MICRO_OBJS): %.o: %.c
 
 main.elf: linker/main.ld startup/startup_main.S src/main.c $(MICRO_OBJS)
 	@echo -e "\n\n*** COMPILING MAIN APPLICATION ***"
-	$(CC) $(CFLAGS) -T $^ $(LDFLAGS) -o $@
+	$(CC) $(CFLAGS) -DMAIN_FLASH_OFFSET=$(MAIN_FLASH_OFFSET) -T $^ $(LDFLAGS) -o $@
 
 main.bin: main.elf
 	$(OBJCOPY) -O binary $< $@
