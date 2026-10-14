@@ -10,7 +10,6 @@ SECTIONS {
 	.text : {
 		KEEP(*(.init))
 		*(.text .text.*)
-		*(.rodata .rodata.* .srodata .srodata.*)
 		
 		. = ALIGN(4);
 		/* libc initialization arrays */
@@ -49,6 +48,8 @@ SECTIONS {
 		*(.isr)
 		*(.usb)
 		*(.sdata .sdata.*)
+		*(.rodata .rodata.*)
+		*(.srodata .srodata.*)
 
 		. = ALIGN(4);
 		_edata = .;
