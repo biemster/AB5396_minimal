@@ -30,8 +30,8 @@ SOFTWARE.
 
 // stuff from iSLER.h that is already included in main.c
 extern void rf_init(void);
-extern int rf_reg_rd(uint8_t reg_addr, uint32_t *value);
-extern void baremetal_ble_tx_custom_frame(uint8_t channel, uint8_t* payload, uint8_t len);
+extern int rf_reg_rd(uint8_t reg_addr, uint32_t *value);\
+extern int minimal_pll_lock_test(uint8_t channel);
 #define BB_CLK (*(volatile uint32_t *)(uintptr_t)(0xf020))
 
 typedef enum {
@@ -68,10 +68,8 @@ void radio_ctrl_callback(struct ush_object *self, struct ush_file_descriptor con
 		self->process_index_item = 0;
 		ush_process_start(self, file);
 	}
-	else if (strcmp(argv[1], "--dtm") == 0) {
-		uint8_t frame[] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 'A', 'B', '5', '3', '9', '6'};
-		baremetal_ble_tx_custom_frame(37, frame, sizeof(frame));
-		ush_print(self, "DTM started.");
+	else if (strcmp(argv[1], "--pll") == 0) {
+		ush_printf(self, "\r\nPLL locked: 0x%08X\r\n", minimal_pll_lock_test(30));
 	}
 	else {
 		ush_print_status(self, USH_STATUS_ERROR_COMMAND_WRONG_ARGUMENTS);
@@ -98,9 +96,6 @@ void radio_ctrl_service(struct ush_object *self, struct ush_file_descriptor cons
 		}
 		else if(self->process_index == RADIO_BB_CLOCK) {
 			ush_write_pointer(self, "BB clock diffs after 100 ticks:\r\n", USH_STATE_PROCESS_SERVICE);
-		}
-		else if(self->process_index == RADIO_ADVERTISE) {
-			ush_write_pointer(self, "Advertising: ", USH_STATE_PROCESS_SERVICE);
 		}
 		break;
 
@@ -152,15 +147,6 @@ void radio_ctrl_service(struct ush_object *self, struct ush_file_descriptor cons
 			}
 			else {
 				ush_write_pointer(self, "---\r\n", USH_STATE_RESET_PROMPT);
-			}
-		}
-		else if(self->process_index == RADIO_ADVERTISE) {
-			if(self->process_index_item > 0) {
-				self->process_index_item--;
-				ush_write_pointer(self, ".", USH_STATE_PROCESS_SERVICE);
-			}
-			else {
-				ush_write_pointer(self, "\r\n--- done ---\r\n", USH_STATE_RESET_PROMPT);
 			}
 		}
 		break;
